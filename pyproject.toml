@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mossy"
+version = "0.1.0"
+description = "MOSS - A conversational AI app for Reachy Mini with LLM + TTS"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "httpx",
+    "numpy",
+    "python-multipart",
+    "reachy_mini",
+    "scipy",
+    "uvicorn",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=4.0.0",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+mossy = "mossy.main:main"
+
+[project.entry-points.reachy_mini_apps]
+mossy = "mossy.main:Moss"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mossy = ["static/*"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]
