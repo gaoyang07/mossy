@@ -1,12 +1,16 @@
 # mossy
 
-MOSS is a Reachy Mini conversational AI app with a local web UI, OpenAI-compatible
-LLM calls, Mosi ASR, and Mosi TTS streaming playback.
+MOSS turns a Reachy Mini into a microphone and a speaker for
+[MOSS-Live](https://47.116.143.69:7635/). Recorded audio is streamed to the
+MOSS-Live websocket API, the speech that comes back is played on the robot, and
+everything in between — voice activity detection, ASR, the LLM turn, TTS — runs
+server-side. It is the same conversation the browser page gives you, moved onto
+the robot.
 
 ## Runtime UI
 
-The screenshot below was captured from the running FastAPI UI at
-`http://127.0.0.1:7863/`.
+A read-only status page (live transcript, connection state, mute) is served at
+`http://<robot>:7863/`. Talking to the robot needs no browser.
 
 ![MOSS runtime UI](docs/assets/runtime-ui.png)
 
@@ -14,14 +18,9 @@ The screenshot below was captured from the running FastAPI UI at
 
 - Python 3.10+
 - A Reachy Mini runtime environment
-- API credentials for:
-  - `MOSI_TTS_API_KEY`
-  - `MOSI_ASR_API_KEY`
-  - `LLM_API_KEY`
+- Network access to a MOSS-Live deployment
 
-The default LLM endpoint is DeepSeek's OpenAI-compatible API. Override
-`LLM_BASE_URL` and `LLM_MODEL` when using Ollama, vLLM, SGLang, or another
-compatible backend.
+No API keys: MOSS-Live's `/api/auth/login` issues an anonymous token.
 
 ## Setup
 
@@ -29,14 +28,16 @@ compatible backend.
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
+```
+
+The defaults in `src/mossy/config.py` already point at the deployment above, so
+`.env` is only needed to override something:
+
+```bash
 cp .env.example .env
 ```
 
-Edit `.env` and fill the required keys before running the app.
-
 ## Run
-
-Load the environment variables and start the Reachy Mini app entrypoint:
 
 ```bash
 set -a
@@ -45,34 +46,59 @@ set +a
 mossy
 ```
 
-The web UI listens on `MOSS_WEB_UI_PORT`, defaulting to `7863`.
-
-For UI-only local verification without robot hardware, start the FastAPI server
-directly:
+To check the status page without robot hardware, start the FastAPI server on its
+own:
 
 ```bash
-set -a
-source .env
-set +a
 PYTHONPATH=src python -c 'from mossy.main import Moss; Moss()._run_server()'
 ```
-
-Then open `http://127.0.0.1:7863/`.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MOSI_TTS_API_KEY` | required | Mosi TTS API key |
-| `MOSI_TTS_BASE_URL` | `https://api.mosi.cn` | Mosi TTS endpoint |
-| `MOSI_ASR_API_KEY` | required | Mosi ASR API key |
-| `MOSI_ASR_BASE_URL` | `https://studio.mosi.cn` | Mosi ASR endpoint |
-| `LLM_API_KEY` | required | OpenAI-compatible API key |
-| `LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI-compatible base URL |
-| `LLM_MODEL` | `deepseek-chat` | Chat model name |
-| `MOSS_WEB_UI_PORT` | `7863` | Local web UI port |
-| `MOSS_AUDIO_GAIN` | `3.0` | TTS playback gain before clipping |
-| `MOSS_SYSTEM_PROMPT` | see `.env.example` | System prompt for short spoken replies |
+| `MOSS_LIVE_URL` | `https://47.116.143.69:7635` | MOSS-Live base URL |
+| `MOSS_LIVE_VERIFY_TLS` | `0` | Verify the server certificate |
+| `MOSS_LIVE_PERSONA` | server default | Persona id from `GET /api/personas` |
+| `MOSS_LIVE_VOICE` | server default | Voice name from `GET /api/voices` |
+| `MOSS_HALF_DUPLEX` | `1` | Close the microphone while the robot speaks |
+| `MOSS_WEB_UI_PORT` | `7863` | Local status page port |
+| `MOSS_AUDIO_GAIN` | `3.0` | Playback gain before clipping |
+
+### TLS
+
+The deployment serves a self-signed certificate (`CN=MOSS-Live`, issued by
+`MOSS-Live Local CA`) for a bare IP, so verification is off by default and the
+app logs a warning at startup. Set `MOSS_LIVE_VERIFY_TLS=1` once the server
+presents a certificate the robot trusts.
+
+### Network
+
+MOSS-Live is reached directly: the client ignores `HTTP_PROXY` / `HTTPS_PROXY` /
+`ALL_PROXY` from the environment rather than tunnelling a realtime audio stream
+through whatever proxy the launching shell happens to export.
+
+### Half duplex
+
+With `MOSS_HALF_DUPLEX=1` the microphone is muted while the robot is speaking
+and for 350 ms afterwards. Without it, any audio path that lacks working echo
+cancellation feeds the robot's own voice back into MOSS-Live's VAD and the robot
+interrupts itself.
+
+The cost is that you cannot interrupt the robot mid-sentence. Set
+`MOSS_HALF_DUPLEX=0` to get barge-in back — the interruption path is implemented
+and works — on hardware whose echo cancellation is effective. Reachy Mini
+wireless routes capture through the XMOS AEC loopback declared in `.asoundrc`;
+setups that fall back to `autoaudiosrc` get GStreamer's `webrtcdsp` instead, and
+setups with a named audio card get no cancellation at all.
+
+## Layout
+
+| File | Role |
+| --- | --- |
+| `live_client.py` | MOSS-Live websocket protocol, including playback acknowledgements |
+| `audio.py` | 16 kHz mic → int16, and streaming 48 kHz → 16 kHz decimation of the reply |
+| `main.py` | Reachy Mini app: microphone pump, speaker, status page |
 
 ## Checks
 

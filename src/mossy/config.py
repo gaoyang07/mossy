@@ -1,35 +1,31 @@
 import os
 
 
-def _required_env(name: str) -> str:
+def _flag(name: str, default: bool) -> bool:
     value = os.environ.get(name)
-    if value is None or value.strip() == "":
-        raise RuntimeError(f"{name} must be set in the environment")
-    return value
+    if value is None:
+        return default
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
-MOSI_TTS_API_KEY = _required_env("MOSI_TTS_API_KEY")
-MOSI_TTS_BASE_URL = os.environ.get(
-    "MOSI_TTS_BASE_URL",
-    "https://api.mosi.cn",
-)
+LIVE_URL = os.environ.get("MOSS_LIVE_URL", "https://47.116.143.69:7635").rstrip("/")
 
-MOSI_ASR_API_KEY = _required_env("MOSI_ASR_API_KEY")
-MOSI_ASR_BASE_URL = os.environ.get(
-    "MOSI_ASR_BASE_URL",
-    "https://studio.mosi.cn",
-)
+# The deployment presents a self-signed certificate issued by "MOSS-Live Local CA"
+# for a bare IP, so verification is off by default. Turn it on once the server has
+# a certificate the robot trusts.
+LIVE_VERIFY_TLS = _flag("MOSS_LIVE_VERIFY_TLS", False)
 
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com")
-LLM_API_KEY = _required_env("LLM_API_KEY")
-LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-chat")
+# Empty means "whatever the server defaults to". Query GET {LIVE_URL}/api/personas
+# and /api/voices for the values this deployment accepts.
+LIVE_PERSONA = os.environ.get("MOSS_LIVE_PERSONA", "")
+LIVE_VOICE = os.environ.get("MOSS_LIVE_VOICE", "")
 
-SYSTEM_PROMPT = os.environ.get(
-    "MOSS_SYSTEM_PROMPT",
-    "你是 MOSS，一个运行在 Reachy Mini 机器人上的 AI 助手。"
-    "你友善、简洁、有趣，用中文回答问题。"
-    "回答控制在两三句话以内，因为你的回复会被转成语音播放。",
-)
+# Drop microphone input while the robot is speaking. Needed whenever the audio
+# stack has no working echo cancellation, otherwise MOSS-Live's server-side VAD
+# hears the speaker and the robot interrupts itself. Turn it off to get barge-in
+# back on hardware whose AEC works (Reachy Mini wireless routes through the XMOS
+# loopback declared in .asoundrc).
+HALF_DUPLEX = _flag("MOSS_HALF_DUPLEX", True)
 
 WEB_UI_PORT = int(os.environ.get("MOSS_WEB_UI_PORT", "7863"))
 

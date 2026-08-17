@@ -5,16 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mossy"
 version = "0.1.0"
-description = "MOSS - A conversational AI app for Reachy Mini with LLM + TTS"
+description = "MOSS - A Reachy Mini voice app driven by the MOSS-Live realtime API"
 requires-python = ">=3.10"
 dependencies = [
     "fastapi",
     "httpx",
     "numpy",
-    "python-multipart",
     "reachy_mini",
     "scipy",
     "uvicorn",
+    "websockets>=15,<16",
 ]
 
 [project.optional-dependencies]
