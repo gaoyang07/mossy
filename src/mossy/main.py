@@ -1,24 +1,45 @@
-"""MOSS - Main entry point for the Reachy Mini conversational AI app."""
+"""MOSS - Main entry point for the Reachy Mini conversational AI app.
 
+The robot is a microphone and a speaker for MOSS-Live: recorded audio goes
+straight to the server, the speech that comes back is played on the robot, and
+the whole conversation (VAD, ASR, LLM, TTS) happens server-side.
+"""
+
+import asyncio
 import logging
-import shutil
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, Request, UploadFile
+import numpy as np
+from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from reachy_mini.apps.app import ReachyMiniApp
 from reachy_mini.reachy_mini import ReachyMini
 
-from . import asr_client, llm_client, tts_client
-from .config import WEB_UI_PORT
+from .audio import SpeechDecimator, mic_to_pcm
+from .config import (
+    AUDIO_GAIN,
+    HALF_DUPLEX,
+    LIVE_PERSONA,
+    LIVE_URL,
+    LIVE_VERIFY_TLS,
+    LIVE_VOICE,
+    WEB_UI_PORT,
+)
+from .live_client import MossLive
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
-VOICE_DIR = Path(__file__).parent / "voices"
+
+# How long the microphone stays shut after the robot stops speaking, so the tail
+# of the speaker (and the room) is not picked up as the next user turn.
+MIC_REOPEN_DELAY = 0.35
+
+TRANSCRIPT_LIMIT = 100
 
 
 class Moss(ReachyMiniApp):
@@ -29,13 +50,24 @@ class Moss(ReachyMiniApp):
 
     def __init__(self) -> None:
         super().__init__()
-        self.conversation: list[dict[str, str]] = []
         self.reachy: ReachyMini | None = None
-        self._processing = False
-        self._ref_audio: Path | None = None
-        self._speak_lock = threading.Lock()
-        self._stop_speak = threading.Event()
-        VOICE_DIR.mkdir(exist_ok=True)
+        self.state = "disconnected"
+        self.transcript: list[dict[str, Any]] = []
+        self.muted = False
+
+        self._transcript_lock = threading.Lock()
+        self._decimator = SpeechDecimator()
+        self._mic_open_at = 0.0
+        self._live = MossLive(
+            LIVE_URL,
+            verify_tls=LIVE_VERIFY_TLS,
+            persona=LIVE_PERSONA,
+            voice=LIVE_VOICE,
+            on_audio=self._on_audio,
+            on_flush=self._on_flush,
+            on_state=self._on_state,
+            on_text=self._on_text,
+        )
 
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event) -> None:
         self.reachy = reachy_mini
@@ -45,17 +77,116 @@ class Moss(ReachyMiniApp):
         reachy_mini.wake_up()
         reachy_mini.enable_wobbling()
 
-        server_thread = threading.Thread(target=self._run_server, daemon=True)
-        server_thread.start()
+        # Capture and playback share one GStreamer pipeline, so they are started
+        # together here and stopped together on the way out — stopping either one
+        # stops both.
+        reachy_mini.media.start_playing()
+        reachy_mini.media.start_recording()
 
+        threading.Thread(target=self._run_server, daemon=True).start()
+        live_thread = threading.Thread(target=self._run_live, args=(stop_event,))
+        live_thread.start()
+
+        if not LIVE_VERIFY_TLS:
+            logger.warning("TLS verification disabled for %s", LIVE_URL)
         logger.info(f"MOSS is running. Web UI at http://localhost:{WEB_UI_PORT}")
 
-        while not stop_event.is_set():
-            stop_event.wait(timeout=1.0)
+        try:
+            self._pump_microphone(stop_event)
+        finally:
+            stop_event.set()
+            live_thread.join(timeout=10)
+            reachy_mini.disable_wobbling()
+            # goto_sleep() plays its own sound through a separate playbin, which
+            # would fight our pipeline for the audio device if it were still up.
+            reachy_mini.media.stop_playing()
+            reachy_mini.goto_sleep()
+            reachy_mini.disable_motors()
 
-        reachy_mini.disable_wobbling()
-        reachy_mini.goto_sleep()
-        reachy_mini.disable_motors()
+    # --- audio --------------------------------------------------------------
+
+    def _pump_microphone(self, stop_event: threading.Event) -> None:
+        """Forward recorded audio to MOSS-Live until the app is stopped.
+
+        ``get_audio_sample()`` blocks for up to 20 ms, which paces this loop.
+        """
+        assert self.reachy is not None
+        media = self.reachy.media
+
+        while not stop_event.is_set():
+            sample = media.get_audio_sample()  # [N, 2] float32 @ 16 kHz
+            if sample is None:
+                continue
+            if self._mic_closed():
+                continue
+            self._live.submit_mic(mic_to_pcm(sample))
+
+    def _mic_closed(self) -> bool:
+        if self.muted:
+            return True
+        if not HALF_DUPLEX:
+            return False
+        if self._live.is_playing:
+            self._mic_open_at = time.monotonic() + MIC_REOPEN_DELAY
+            return True
+        return time.monotonic() < self._mic_open_at
+
+    def _on_audio(self, pcm: bytes) -> None:
+        """Play one chunk of MOSS-Live speech (mono int16 LE @ 48 kHz)."""
+        if self.reachy is None:
+            return
+        samples = self._decimator(pcm)  # [N] float32 @ 16 kHz
+        if AUDIO_GAIN != 1.0:
+            samples = np.clip(samples * AUDIO_GAIN, -1.0, 1.0).astype(np.float32)
+        self.reachy.media.push_audio_sample(samples)
+
+    def _on_flush(self) -> None:
+        """Barge-in: drop audio the robot has not spoken yet."""
+        self._decimator.reset()
+        if self.reachy is not None and self.reachy.media.audio is not None:
+            self.reachy.media.audio.clear_player()
+
+    # --- conversation state -------------------------------------------------
+
+    def _on_state(self, state: str) -> None:
+        self.state = state
+
+    def _on_text(self, role: str, text: str, final: bool) -> None:
+        """Record a transcript line, replacing the one still being streamed."""
+        with self._transcript_lock:
+            if (
+                self.transcript
+                and self.transcript[-1]["role"] == role
+                and not self.transcript[-1]["final"]
+            ):
+                self.transcript[-1] = {"role": role, "text": text, "final": final}
+            else:
+                self.transcript.append({"role": role, "text": text, "final": final})
+            del self.transcript[:-TRANSCRIPT_LIMIT]
+
+    # --- MOSS-Live session --------------------------------------------------
+
+    def _run_live(self, stop_event: threading.Event) -> None:
+        async def main() -> None:
+            stop = asyncio.Event()
+
+            async def watch_stop() -> None:
+                while not stop_event.is_set():
+                    await asyncio.sleep(0.2)
+                stop.set()
+
+            watcher = asyncio.create_task(watch_stop())
+            try:
+                await self._live.run(stop)
+            finally:
+                watcher.cancel()
+
+        try:
+            asyncio.run(main())
+        except Exception:
+            logger.exception("MOSS-Live client stopped")
+
+    # --- web UI -------------------------------------------------------------
 
     def _run_server(self) -> None:
         import uvicorn
@@ -68,131 +199,27 @@ class Moss(ReachyMiniApp):
 
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-        @app.post("/chat")
-        async def chat(request: Request):
-            body = await request.json()
-            user_msg = body.get("message", "").strip()
-            if not user_msg:
-                return JSONResponse({"error": "empty message"}, status_code=400)
-
-            if self._processing:
-                return JSONResponse({"error": "busy"}, status_code=429)
-
-            self._processing = True
-            try:
-                self.conversation.append({"role": "user", "content": user_msg})
-                reply = llm_client.chat_completion(self.conversation)
-                self.conversation.append({"role": "assistant", "content": reply})
-
-                threading.Thread(target=self._speak, args=(reply,), daemon=True).start()
-
-                return JSONResponse({"reply": reply})
-            finally:
-                self._processing = False
-
-        @app.post("/transcribe")
-        async def transcribe(file: UploadFile):
-            if self._processing:
-                return JSONResponse({"error": "busy"}, status_code=429)
-
-            self._processing = True
-            try:
-                audio_data = await file.read()
-                filename = file.filename or "recording.webm"
-                text = asr_client.transcribe(audio_data, filename)
-                if not text:
-                    return JSONResponse({"error": "语音识别失败，请重试"}, status_code=500)
-
-                self.conversation.append({"role": "user", "content": text})
-                reply = llm_client.chat_completion(self.conversation)
-                self.conversation.append({"role": "assistant", "content": reply})
-
-                threading.Thread(target=self._speak, args=(reply,), daemon=True).start()
-
-                return JSONResponse({"user_text": text, "reply": reply})
-            finally:
-                self._processing = False
-
-        @app.post("/upload-voice")
-        async def upload_voice(file: UploadFile):
-            if file.filename is None:
-                return JSONResponse({"error": "no file"}, status_code=400)
-
-            suffix = Path(file.filename).suffix.lower()
-            if suffix not in (".wav", ".mp3"):
-                return JSONResponse({"error": "仅支持 WAV 或 MP3 格式"}, status_code=400)
-
-            dest = VOICE_DIR / f"ref_voice{suffix}"
-            with open(dest, "wb") as f:
-                shutil.copyfileobj(file.file, f)
-
-            self._ref_audio = dest
-            logger.info(f"Voice reference uploaded: {dest} ({dest.stat().st_size} bytes)")
+        @app.get("/state")
+        async def state():
+            with self._transcript_lock:
+                transcript = list(self.transcript)
             return JSONResponse(
                 {
-                    "status": "ok",
-                    "filename": file.filename,
-                    "size": dest.stat().st_size,
+                    "state": self.state,
+                    "connected": self._live.connected,
+                    "muted": self.muted,
+                    "session_id": self._live.session_id,
+                    "latency": self._live.latency,
+                    "transcript": transcript,
                 }
             )
 
-        @app.post("/remove-voice")
-        async def remove_voice():
-            if self._ref_audio and self._ref_audio.exists():
-                self._ref_audio.unlink()
-            self._ref_audio = None
-            return JSONResponse({"status": "ok"})
-
-        @app.get("/voice-status")
-        async def voice_status():
-            if self._ref_audio and self._ref_audio.exists():
-                return JSONResponse(
-                    {
-                        "has_voice": True,
-                        "filename": self._ref_audio.name,
-                        "size": self._ref_audio.stat().st_size,
-                    }
-                )
-            return JSONResponse({"has_voice": False})
-
-        @app.post("/clear")
-        async def clear():
-            self.conversation.clear()
-            return JSONResponse({"status": "ok"})
+        @app.post("/mute")
+        async def mute():
+            self.muted = not self.muted
+            return JSONResponse({"muted": self.muted})
 
         uvicorn.run(app, host="0.0.0.0", port=WEB_UI_PORT, log_level="warning")
-
-    def _speak(self, text: str) -> None:
-        if self.reachy is None:
-            return
-
-        self._stop_speak.set()
-
-        with self._speak_lock:
-            self._stop_speak.clear()
-
-            try:
-                self.reachy.media.start_playing()
-
-                total_samples = 0
-                for chunk in tts_client.synthesize_stream(text, self._ref_audio):
-                    if self._stop_speak.is_set():
-                        break
-                    total_samples += len(chunk)
-                    self.reachy.media.push_audio_sample(chunk)
-
-                if total_samples == 0:
-                    logger.warning("TTS stream returned no data, skipping")
-                    return
-
-                playback_secs = total_samples / 16000.0
-                logger.info("TTS pushed %.1fs of audio, waiting for playback", playback_secs)
-                self._stop_speak.wait(timeout=playback_secs + 0.5)
-
-            except Exception as e:
-                logger.error(f"Streaming playback failed: {e}")
-            finally:
-                self.reachy.media.stop_playing()
 
 
 def main() -> None:

@@ -10,40 +10,26 @@
     <div class="container">
         <header>
             <h1>MOSS</h1>
-            <p class="subtitle">Reachy Mini AI Assistant</p>
+            <p class="subtitle">Reachy Mini · MOSS-Live 语音对话</p>
         </header>
 
-        <div class="voice-panel" id="voice-panel">
-            <div class="voice-info" id="voice-info">
-                <span class="voice-label">音色克隆</span>
-                <span class="voice-status" id="voice-status">未上传参考音频</span>
+        <div class="voice-panel">
+            <div class="voice-info">
+                <span class="status-dot" id="status-dot"></span>
+                <span class="voice-status" id="status-text">连接中…</span>
             </div>
             <div class="voice-actions">
-                <label class="upload-btn" id="upload-label">
-                    <span id="upload-text">上传音频</span>
-                    <input type="file" id="voice-upload" accept=".wav,.mp3" hidden>
-                </label>
-                <button class="remove-btn" id="remove-voice-btn" hidden>移除</button>
+                <button class="remove-btn" id="mute-btn">静音麦克风</button>
             </div>
         </div>
 
         <div class="chat-window" id="chat-window">
             <div class="message system">
-                <span class="content">你好！我是 MOSS，有什么可以帮你的？</span>
+                <span class="content">对着机器人说话即可，语音识别与回复都在 MOSS-Live 服务端完成。</span>
             </div>
         </div>
 
-        <div class="input-area">
-            <input type="text" id="user-input" placeholder="输入消息或点击麦克风..." autocomplete="off">
-            <button id="mic-btn" title="按住说话">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
-                    <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
-                </svg>
-            </button>
-            <button id="send-btn">发送</button>
-            <button id="clear-btn" title="清空对话">🗑</button>
-        </div>
+        <div class="status-bar" id="latency"></div>
     </div>
 
     <script src="/static/main.js"></script>
