@@ -21,14 +21,21 @@ from reachy_mini.reachy_mini import ReachyMini
 
 from .audio import SpeechDecimator, mic_to_pcm
 from .config import (
+    API_KEY,
     AUDIO_GAIN,
+    EXPRESSION_INTENSITY,
+    EXPRESSIONS_ENABLED,
     HALF_DUPLEX,
-    LIVE_PERSONA,
+    LIVE_INSTRUCTIONS,
+    LIVE_MODEL,
+    LIVE_NAME,
+    LIVE_PROMPT,
     LIVE_URL,
+    LIVE_USER,
     LIVE_VERIFY_TLS,
-    LIVE_VOICE,
     WEB_UI_PORT,
 )
+from .expressions import Expressions
 from .live_client import MossLive
 
 logger = logging.getLogger(__name__)
@@ -54,19 +61,25 @@ class Moss(ReachyMiniApp):
         self.state = "disconnected"
         self.transcript: list[dict[str, Any]] = []
         self.muted = False
+        self._expressions: Expressions | None = None
 
         self._transcript_lock = threading.Lock()
         self._decimator = SpeechDecimator()
         self._mic_open_at = 0.0
         self._live = MossLive(
             LIVE_URL,
+            api_key=API_KEY,
+            model=LIVE_MODEL,
+            user=LIVE_USER,
             verify_tls=LIVE_VERIFY_TLS,
-            persona=LIVE_PERSONA,
-            voice=LIVE_VOICE,
+            name=LIVE_NAME,
+            prompt=LIVE_PROMPT,
+            instructions=LIVE_INSTRUCTIONS,
             on_audio=self._on_audio,
             on_flush=self._on_flush,
             on_state=self._on_state,
             on_text=self._on_text,
+            on_event=self._on_event,
         )
 
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event) -> None:
@@ -76,6 +89,10 @@ class Moss(ReachyMiniApp):
         time.sleep(0.2)
         reachy_mini.wake_up()
         reachy_mini.enable_wobbling()
+        self._expressions = Expressions(
+            reachy_mini, enabled=EXPRESSIONS_ENABLED, intensity=EXPRESSION_INTENSITY
+        )
+        self._expressions.start()
 
         # Capture and playback share one GStreamer pipeline, so they are started
         # together here and stopped together on the way out — stopping either one
@@ -96,6 +113,7 @@ class Moss(ReachyMiniApp):
         finally:
             stop_event.set()
             live_thread.join(timeout=10)
+            self._expressions.stop()
             reachy_mini.disable_wobbling()
             # goto_sleep() plays its own sound through a separate playbin, which
             # would fight our pipeline for the audio device if it were still up.
@@ -118,6 +136,9 @@ class Moss(ReachyMiniApp):
             if sample is None:
                 continue
             if self._mic_closed():
+                # Keep the realtime input clock moving without feeding speaker
+                # echo (or muted microphone content) back to the model.
+                self._live.submit_mic(bytes(sample.shape[0] * 2))
                 continue
             self._live.submit_mic(mic_to_pcm(sample))
 
@@ -150,6 +171,10 @@ class Moss(ReachyMiniApp):
 
     def _on_state(self, state: str) -> None:
         self.state = state
+
+    def _on_event(self, action: str, data: dict[str, Any]) -> None:
+        if self._expressions is not None:
+            self._expressions.submit(action, data)
 
     def _on_text(self, role: str, text: str, final: bool) -> None:
         """Record a transcript line, replacing the one still being streamed."""
@@ -210,6 +235,9 @@ class Moss(ReachyMiniApp):
                     "muted": self.muted,
                     "session_id": self._live.session_id,
                     "latency": self._live.latency,
+                    "error": self._live.last_error,
+                    "full_duplex": not HALF_DUPLEX,
+                    "expressions": self._expressions.snapshot() if self._expressions else None,
                     "transcript": transcript,
                 }
             )
@@ -218,6 +246,14 @@ class Moss(ReachyMiniApp):
         async def mute():
             self.muted = not self.muted
             return JSONResponse({"muted": self.muted})
+
+        @app.post("/expressions/toggle")
+        async def toggle_expressions():
+            if self._expressions is None:
+                return JSONResponse({"error": "Robot is not running"}, status_code=503)
+            enabled = not self._expressions.snapshot()["enabled"]
+            self._expressions.submit("motion.enabled", {"enabled": enabled})
+            return JSONResponse({"enabled": enabled})
 
         uvicorn.run(app, host="0.0.0.0", port=WEB_UI_PORT, log_level="warning")
 

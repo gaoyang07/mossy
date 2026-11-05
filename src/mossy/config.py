@@ -1,4 +1,12 @@
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Desktop-launched apps do not inherit a terminal's exported variables. Keep
+# credentials outside the checkout; explicit environment variables win.
+load_dotenv(Path.home() / ".config" / "mossy" / ".env")
+load_dotenv(Path.cwd() / ".env")
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -8,17 +16,14 @@ def _flag(name: str, default: bool) -> bool:
     return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
-LIVE_URL = os.environ.get("MOSS_LIVE_URL", "https://47.116.143.69:7635").rstrip("/")
-
-# The deployment presents a self-signed certificate issued by "MOSS-Live Local CA"
-# for a bare IP, so verification is off by default. Turn it on once the server has
-# a certificate the robot trusts.
-LIVE_VERIFY_TLS = _flag("MOSS_LIVE_VERIFY_TLS", False)
-
-# Empty means "whatever the server defaults to". Query GET {LIVE_URL}/api/personas
-# and /api/voices for the values this deployment accepts.
-LIVE_PERSONA = os.environ.get("MOSS_LIVE_PERSONA", "")
-LIVE_VOICE = os.environ.get("MOSS_LIVE_VOICE", "")
+LIVE_URL = os.environ.get("MOSS_LIVE_URL", "https://api.mosi.cn").rstrip("/")
+API_KEY = os.environ.get("MOSS_API_KEY", "")
+LIVE_MODEL = os.environ.get("MOSS_LIVE_MODEL", "moss-live-1.0")
+LIVE_USER = os.environ.get("MOSS_LIVE_USER", "reachy-mini")
+LIVE_VERIFY_TLS = _flag("MOSS_LIVE_VERIFY_TLS", True)
+LIVE_NAME = os.environ.get("MOSS_LIVE_NAME", "MOSS")
+LIVE_PROMPT = os.environ.get("MOSS_LIVE_PROMPT", "")
+LIVE_INSTRUCTIONS = os.environ.get("MOSS_LIVE_INSTRUCTIONS", "请用简洁自然的中文回答。")
 
 # Drop microphone input while the robot is speaking. Needed whenever the audio
 # stack has no working echo cancellation, otherwise MOSS-Live's server-side VAD
@@ -29,4 +34,7 @@ HALF_DUPLEX = _flag("MOSS_HALF_DUPLEX", True)
 
 WEB_UI_PORT = int(os.environ.get("MOSS_WEB_UI_PORT", "7863"))
 
-AUDIO_GAIN = float(os.environ.get("MOSS_AUDIO_GAIN", "3.0"))
+AUDIO_GAIN = float(os.environ.get("MOSS_AUDIO_GAIN", "1.0"))
+
+EXPRESSIONS_ENABLED = _flag("MOSS_EXPRESSIONS", True)
+EXPRESSION_INTENSITY = float(os.environ.get("MOSS_EXPRESSION_INTENSITY", "0.45"))
