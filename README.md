@@ -1,4 +1,8 @@
-# mossy
+<p align="center">
+  <img src="docs/assets/mossy-logo.png" alt="mossy: a robot with two antennae and an orange M-shaped voice wave" width="220" />
+</p>
+
+<h1 align="center">mossy</h1>
 
 Voice conversations and expressive motion for Reachy Mini, powered by the
 [MOSS-Live public API](https://platform.moss.cn/docs/scenarios/moss-live/).
@@ -231,3 +235,5 @@ pre-commit install
 | [expressions.py](src/mossy/expressions.py) | Expression rules, motion assets and the cancellable worker |
 | [main.py](src/mossy/main.py) | Robot lifecycle, audio capture/playback and runtime UI |
 | [tests/](tests/) | Protocol and expression regression tests |
+
+[Logo design brief and visual references](docs/assets/mossy-logo.md).
