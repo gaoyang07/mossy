@@ -9,7 +9,6 @@ description = "MOSS - A Reachy Mini voice app driven by the MOSS-Live realtime A
 requires-python = ">=3.10"
 dependencies = [
     "fastapi",
-    "httpx",
     "huggingface-hub",
     "numpy",
     "Pillow>=10",
