@@ -1,0 +1,41 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install check dependencies
+        run: python -m pip install "ruff>=0.8.0" numpy scipy "Pillow>=10" "python-dotenv>=1.0" "websockets>=15,<16"
+      - name: Run checks
+        run: make check
+
+  app:
+    # The whole app against a simulated robot. It needs the Reachy SDK, which
+    # the quick job above leaves out.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install what PyGObject builds against
+        # On Linux the SDK depends on PyGObject, which is built from source.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgirepository1.0-dev libcairo2-dev
+      - name: Install mossy with the Reachy SDK it is tested against
+        run: python -m pip install -e . "reachy_mini==1.8.4"
+      - name: Import the app
+        # The whole-app tests skip themselves without the SDK. Here that must fail.
+        run: python -c "import mossy.main"
+      - name: Run every test
+        run: make test

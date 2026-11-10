@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>mossy - MOSS-Live conversations for Reachy Mini</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <img class="logo" src="docs/assets/mossy-logo.png" alt="mossy: a robot with two antennae and an orange M-shaped voice wave">
+        <h1>mossy</h1>
+        <p class="tagline">Voice and visual conversations with expressive motion for Reachy Mini, powered by MOSS-Live</p>
+        <div class="features">
+            <div class="feature">
+                <h3>Realtime voice</h3>
+                <p>MOSS-Live recognizes speech, holds the conversation and speaks in one realtime session. In full duplex you can interrupt the robot mid-sentence.</p>
+            </div>
+            <div class="feature">
+                <h3>Sees what it looks at</h3>
+                <p>Opt in, and frames from the robot's own camera go to the same session, so you can ask about what is in front of it.</p>
+            </div>
+            <div class="feature">
+                <h3>Expressive robot</h3>
+                <p>Happy, agreeing, thinking and listening gestures from the official recordings, speech-driven head wobble, and a resting posture you choose.</p>
+            </div>
+            <div class="feature">
+                <h3>One command</h3>
+                <p><code>mossy start</code>, <code>stop</code>, <code>status</code> and <code>config</code> run the Reachy daemon and the app, and change settings while it talks.</p>
+            </div>
+            <div class="feature">
+                <h3>Settings page</h3>
+                <p>Pick the voice, speaking rate, persona and posture in the browser. Changes apply to the running conversation and are saved.</p>
+            </div>
+            <div class="feature">
+                <h3>Measured latency</h3>
+                <p>The page and <code>mossy status</code> report the time from the end of your speech to the first reply audio, and the round trip to MOSS-Live.</p>
+            </div>
+        </div>
+        <img class="screenshot" src="docs/assets/runtime-ui.png" alt="The mossy page: status, camera preview and transcript on the left, settings on the right">
+        <div class="install">
+            <h2>Quick start</h2>
+            <pre><code>PYTHONPATH=src python3 -m mossy.cli install
+mossy config set MOSS_API_KEY=your-key
+mossy start</code></pre>
+            <p class="note">For macOS with Reachy Mini Control; a MOSS API key is required. The README covers other setups, every command and every setting.</p>
+        </div>
+    </div>
+</body>
+</html>
