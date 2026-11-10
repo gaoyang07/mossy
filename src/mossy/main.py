@@ -1,8 +1,7 @@
 """MOSS - Main entry point for the Reachy Mini conversational AI app.
 
-The robot is a microphone and a speaker for MOSS-Live: recorded audio goes
-straight to the server, the speech that comes back is played on the robot, and
-the whole conversation (VAD, ASR, LLM, TTS) happens server-side.
+Robot microphone audio and optional camera frames go to MOSS-Live. Returned
+speech plays on the robot; capture, playback and expressions run independently.
 """
 
 import asyncio
@@ -13,16 +12,21 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from reachy_mini.apps.app import ReachyMiniApp
 from reachy_mini.reachy_mini import ReachyMini
 
 from .audio import SpeechDecimator, mic_to_pcm
+from .camera import Camera, local_camera_access
 from .config import (
     API_KEY,
     AUDIO_GAIN,
+    CAMERA_ENABLED,
+    CAMERA_FPS,
+    CAMERA_JPEG_QUALITY,
+    CAMERA_MAX_EDGE,
     EXPRESSION_INTENSITY,
     EXPRESSIONS_ENABLED,
     HALF_DUPLEX,
@@ -33,6 +37,7 @@ from .config import (
     LIVE_URL,
     LIVE_USER,
     LIVE_VERIFY_TLS,
+    LIVE_VOICE_ID,
     WEB_UI_PORT,
 )
 from .expressions import Expressions
@@ -62,6 +67,7 @@ class Moss(ReachyMiniApp):
         self.transcript: list[dict[str, Any]] = []
         self.muted = False
         self._expressions: Expressions | None = None
+        self._camera: Camera | None = None
 
         self._transcript_lock = threading.Lock()
         self._decimator = SpeechDecimator()
@@ -70,11 +76,13 @@ class Moss(ReachyMiniApp):
             LIVE_URL,
             api_key=API_KEY,
             model=LIVE_MODEL,
+            voice_id=LIVE_VOICE_ID,
             user=LIVE_USER,
             verify_tls=LIVE_VERIFY_TLS,
             name=LIVE_NAME,
             prompt=LIVE_PROMPT,
             instructions=LIVE_INSTRUCTIONS,
+            camera_enabled=CAMERA_ENABLED,
             on_audio=self._on_audio,
             on_flush=self._on_flush,
             on_state=self._on_state,
@@ -84,6 +92,15 @@ class Moss(ReachyMiniApp):
 
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event) -> None:
         self.reachy = reachy_mini
+        self._camera = Camera(
+            reachy_mini.media.get_frame,
+            self._live.submit_camera,
+            self._live.set_camera_enabled,
+            enabled=CAMERA_ENABLED,
+            fps=CAMERA_FPS,
+            max_edge=CAMERA_MAX_EDGE,
+            quality=CAMERA_JPEG_QUALITY,
+        )
 
         reachy_mini.enable_motors()
         time.sleep(0.2)
@@ -99,6 +116,7 @@ class Moss(ReachyMiniApp):
         # stops both.
         reachy_mini.media.start_playing()
         reachy_mini.media.start_recording()
+        self._camera.start()
 
         threading.Thread(target=self._run_server, daemon=True).start()
         live_thread = threading.Thread(target=self._run_live, args=(stop_event,))
@@ -112,6 +130,7 @@ class Moss(ReachyMiniApp):
             self._pump_microphone(stop_event)
         finally:
             stop_event.set()
+            self._camera.stop()
             live_thread.join(timeout=10)
             self._expressions.stop()
             reachy_mini.disable_wobbling()
@@ -218,6 +237,14 @@ class Moss(ReachyMiniApp):
 
         app = FastAPI()
 
+        def camera_access(request: Request) -> bool:
+            return local_camera_access(
+                request.client.host if request.client else None,
+                request.headers.get("host", ""),
+                request.headers.get("origin"),
+                request.headers.get("sec-fetch-site"),
+            )
+
         @app.get("/")
         async def index():
             return FileResponse(STATIC_DIR / "index.html")
@@ -225,7 +252,7 @@ class Moss(ReachyMiniApp):
         app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
         @app.get("/state")
-        async def state():
+        async def state(request: Request):
             with self._transcript_lock:
                 transcript = list(self.transcript)
             return JSONResponse(
@@ -234,10 +261,17 @@ class Moss(ReachyMiniApp):
                     "connected": self._live.connected,
                     "muted": self.muted,
                     "session_id": self._live.session_id,
+                    "voice_id": self._live.voice_id,
                     "latency": self._live.latency,
                     "error": self._live.last_error,
                     "full_duplex": not HALF_DUPLEX,
                     "expressions": self._expressions.snapshot() if self._expressions else None,
+                    "camera": (
+                        {**self._camera.snapshot(), **self._live.camera_status()}
+                        if self._camera
+                        else None
+                    ),
+                    "camera_local_access": camera_access(request),
                     "transcript": transcript,
                 }
             )
@@ -254,6 +288,27 @@ class Moss(ReachyMiniApp):
             enabled = not self._expressions.snapshot()["enabled"]
             self._expressions.submit("motion.enabled", {"enabled": enabled})
             return JSONResponse({"enabled": enabled})
+
+        @app.post("/camera/toggle")
+        async def toggle_camera(request: Request):
+            if not camera_access(request):
+                return JSONResponse(
+                    {"error": "Camera controls require local access"}, status_code=403
+                )
+            if self._camera is None:
+                return JSONResponse({"error": "Robot is not running"}, status_code=503)
+            enabled = not self._camera.snapshot()["enabled"]
+            self._camera.set_enabled(enabled)
+            return JSONResponse({"enabled": enabled})
+
+        @app.get("/camera/frame")
+        async def camera_frame(request: Request):
+            if not camera_access(request):
+                return Response(status_code=403)
+            jpeg = self._camera.preview() if self._camera is not None else None
+            if jpeg is None:
+                return Response(status_code=204, headers={"Cache-Control": "no-store"})
+            return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
         uvicorn.run(app, host="0.0.0.0", port=WEB_UI_PORT, log_level="warning")
 

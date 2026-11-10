@@ -10,7 +10,7 @@
     <div class="container">
         <header>
             <h1>MOSS</h1>
-            <p class="subtitle">Reachy Mini · MOSS-Live 语音对话</p>
+            <p class="subtitle">Reachy Mini · MOSS-Live 视听对话</p>
         </header>
 
         <div class="voice-panel">
@@ -21,10 +21,16 @@
             <div class="voice-actions">
                 <button class="remove-btn" id="mute-btn">静音麦克风</button>
                 <button class="remove-btn" id="expressions-btn">关闭表情动作</button>
+                <button class="remove-btn" id="camera-btn" disabled>开启视觉</button>
             </div>
         </div>
 
         <div class="status-bar" id="expression-status">表情动作准备中…</div>
+        <div class="status-bar" id="camera-status">视觉未开启</div>
+        <div class="camera-panel" id="camera-panel" hidden>
+            <img id="camera-preview" alt="Reachy Mini 机身摄像头的当前画面" />
+            <p>Reachy Mini 机身摄像头 · 开启视觉时画面发送到 MOSS</p>
+        </div>
 
         <div class="chat-window" id="chat-window">
             <div class="message system">

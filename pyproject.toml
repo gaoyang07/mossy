@@ -12,6 +12,7 @@ dependencies = [
     "httpx",
     "huggingface-hub",
     "numpy",
+    "Pillow>=10",
     "python-dotenv>=1.0",
     "reachy_mini",
     "scipy",

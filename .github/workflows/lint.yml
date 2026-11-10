@@ -13,6 +13,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install check dependencies
-        run: python -m pip install "ruff>=0.8.0" numpy scipy "websockets>=15,<16"
+        run: python -m pip install "ruff>=0.8.0" numpy scipy "Pillow>=10" "websockets>=15,<16"
       - name: Run checks
         run: make check

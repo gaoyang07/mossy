@@ -4,19 +4,23 @@
 
 <h1 align="center">mossy</h1>
 
-Voice conversations and expressive motion for Reachy Mini, powered by the
+Voice and visual conversations with expressive motion for Reachy Mini, powered by the
 [MOSS-Live public API](https://platform.moss.cn/docs/scenarios/moss-live/).
 
 MOSS-Live handles speech recognition, conversation and speech generation. mossy
-streams the robot's microphone and speaker audio, manages playback and
-interruptions, and adds local gestures using official Reachy motion recordings.
+streams the robot's microphone, optional onboard camera input and speaker audio,
+manages playback and interruptions, and adds local gestures using official Reachy
+motion recordings.
 
 - Real-time voice conversation with `moss-live-1.0`.
 - Optional full-duplex conversation with interruption support.
+- Visual questions using frames from Reachy Mini's onboard camera.
 - Happy, agreeing, thinking and listening gestures, alongside speech-driven head wobbling.
 - A local page for transcripts, connection state, microphone mute and expression controls.
 
-The current integration uses audio; camera frames are not uploaded to MOSS.
+Vision is opt-in. When enabled, JPEG frames from the robot's camera are sent to
+MOSS-Live on the same connection as audio. The app reads the Reachy SDK camera
+feed; it does not select a laptop webcam as a fallback.
 
 ## Quick start
 
@@ -96,8 +100,8 @@ mossy
 
 Open <http://127.0.0.1:7863/> on the computer running mossy. The page shows live
 transcripts, connection state and the current gesture, with buttons to mute the
-microphone and toggle expressions. Talking to the robot does not require keeping
-the page open.
+microphone, toggle expressions and enable visual input. Talking to the robot does
+not require keeping the page open.
 
 Stop a terminal-launched app with `Ctrl+C`. MOSS-Live bills from session attachment
 until the WebSocket closes; muting or closing the browser keeps the session
@@ -122,7 +126,7 @@ dashboard, and stop it there when finished. It reads the same
 `~/.config/mossy/.env` and Hugging Face cache for that OS user. Use the matching app
 environment for other Reachy deployment types; the path above is macOS-specific.
 
-## Full duplex and expressions
+## Voice, vision and expressions
 
 ### Conversation mode
 
@@ -139,6 +143,29 @@ MOSS_HALF_DUPLEX=0
 The microphone then remains active during replies, allowing you to interrupt.
 If speaker echo causes the robot to interrupt itself, use half duplex while
 checking the audio setup. Echo handling depends on the Reachy runtime and device.
+
+### Visual questions
+
+Click **开启视觉** on the local status page, or set `MOSS_CAMERA=1` in the local
+configuration and restart mossy. Point Reachy Mini at an object and ask a question
+aloud, for example “你面前是什么，是什么颜色？”. The page shows the robot's current
+view and the number of frames sent to MOSS.
+
+The default is 1 frame per second, JPEG quality 80 and a maximum image edge of
+640 pixels. Capture and encoding run separately from audio; only the latest frame
+is queued and old frames are dropped. Audio stays active when visual input is
+disabled. Frames are kept in memory for preview and are not saved by the app.
+
+Preview and camera controls are available only from a local browser on the machine
+running mossy. **关闭视觉** stops frame uploads and clears the preview; it does not
+turn off the camera hardware used by the Reachy daemon. The browser switch affects
+the current process; use `MOSS_CAMERA` for the persistent setting.
+
+On macOS, the app launching the Reachy daemon needs Camera permission even for
+the robot's USB camera. Allow the relevant launcher, such as Reachy Mini Control
+or Terminal, in System Settings → Privacy & Security → Camera. Restart the daemon
+from that authorized launcher if it previously failed to open the camera. Camera
+failure leaves voice available and is shown in the status page.
 
 ### Expression behaviour
 
@@ -178,6 +205,10 @@ mute and expressions at runtime.
 | `MOSS_HALF_DUPLEX` | `1` | `0` enables listening during replies |
 | `MOSS_EXPRESSIONS` | `1` | Enable conversation gestures |
 | `MOSS_EXPRESSION_INTENSITY` | `0.45` | Gesture amplitude, from `0` to `1` |
+| `MOSS_CAMERA` | `0` | Send the robot's camera frames to MOSS-Live |
+| `MOSS_CAMERA_FPS` | `1` | Capture/send rate, from `0.5` to `5` FPS |
+| `MOSS_CAMERA_MAX_EDGE` | `640` | Maximum JPEG width or height, from `128` to `1920` pixels |
+| `MOSS_CAMERA_JPEG_QUALITY` | `80` | JPEG quality, from `1` to `95` |
 | `MOSS_AUDIO_GAIN` | `1.0` | Software playback gain before clipping |
 | `MOSS_WEB_UI_PORT` | `7863` | Status page port on the machine running mossy |
 | `MOSS_LIVE_NAME` | `MOSS` | Assistant name used for address recognition |
@@ -185,6 +216,7 @@ mute and expressions at runtime.
 | `MOSS_LIVE_INSTRUCTIONS` | `请用简洁自然的中文回答。` | Session instructions |
 | `MOSS_LIVE_URL` | `https://api.mosi.cn` | API origin; the client adds `/v1/realtime` |
 | `MOSS_LIVE_MODEL` | `moss-live-1.0` | Model query parameter |
+| `MOSS_LIVE_VOICE_ID` | empty | Optional platform voice ID; wait for `voice_changed` before enabling input, and reapply on reconnect |
 | `MOSS_LIVE_USER` | `reachy-mini` | Stable user ID used on reconnect |
 | `MOSS_LIVE_VERIFY_TLS` | `1` | Verify the API server certificate |
 
@@ -200,6 +232,7 @@ bypass settings.
 | Local SDK connection fails with a proxy enabled | Include `localhost,127.0.0.1,::1` in `NO_PROXY` and `no_proxy`; preserve any other bypass hosts you need. The MOSS API connection itself uses a direct WebSocket connection. |
 | No reply sound | Check the robot output device and its speaker volume in the daemon dashboard. `MOSS_AUDIO_GAIN` is software gain, not the device volume. |
 | Expressions are unavailable | Run the recording download step under the app's OS user and inspect `expressions.error` in `/state`. |
+| Visual input shows no frames | Check Reachy's camera connection and the daemon launcher's Camera permission. `camera.captured_frames` reports capture, while `camera.sent_frames` reports uploads; voice can remain connected with neither. |
 | Control is stuck on a permission screen | Follow the runtime's platform permission setup. The browser dashboard can manage apps only if the daemon is already running; opening it does not start the daemon. |
 
 Playback receipts are paced using PCM duration because the current integration
@@ -217,8 +250,8 @@ make check
 ```
 
 `make check` runs Ruff lint and format checks, unit tests and Python compilation.
-GitHub Actions runs the same checks on Python 3.12 with only Ruff, NumPy, SciPy and
-WebSockets installed. Tests import the checkout through `PYTHONPATH=src` and use
+GitHub Actions runs the same checks on Python 3.12 with Ruff, NumPy, SciPy, Pillow
+and WebSockets installed. Tests import the checkout through `PYTHONPATH=src` and use
 simulated robot output and a local WebSocket peer; they need no API key, robot,
 media stack or downloaded recordings. Hardware checks are separate from CI.
 
@@ -232,6 +265,7 @@ pre-commit install
 | --- | --- |
 | [live_client.py](src/mossy/live_client.py) | Public MOSS-Live protocol, reconnects and playback receipts |
 | [audio.py](src/mossy/audio.py) | Convert 16 kHz microphone input and resample 48 kHz replies for Reachy playback |
+| [camera.py](src/mossy/camera.py) | Encode robot BGR frames, manage visual input and local preview |
 | [expressions.py](src/mossy/expressions.py) | Expression rules, motion assets and the cancellable worker |
 | [main.py](src/mossy/main.py) | Robot lifecycle, audio capture/playback and runtime UI |
 | [tests/](tests/) | Protocol and expression regression tests |

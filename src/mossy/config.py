@@ -19,6 +19,7 @@ def _flag(name: str, default: bool) -> bool:
 LIVE_URL = os.environ.get("MOSS_LIVE_URL", "https://api.mosi.cn").rstrip("/")
 API_KEY = os.environ.get("MOSS_API_KEY", "")
 LIVE_MODEL = os.environ.get("MOSS_LIVE_MODEL", "moss-live-1.0")
+LIVE_VOICE_ID = os.environ.get("MOSS_LIVE_VOICE_ID", "").strip()
 LIVE_USER = os.environ.get("MOSS_LIVE_USER", "reachy-mini")
 LIVE_VERIFY_TLS = _flag("MOSS_LIVE_VERIFY_TLS", True)
 LIVE_NAME = os.environ.get("MOSS_LIVE_NAME", "MOSS")
@@ -38,3 +39,8 @@ AUDIO_GAIN = float(os.environ.get("MOSS_AUDIO_GAIN", "1.0"))
 
 EXPRESSIONS_ENABLED = _flag("MOSS_EXPRESSIONS", True)
 EXPRESSION_INTENSITY = float(os.environ.get("MOSS_EXPRESSION_INTENSITY", "0.45"))
+
+CAMERA_ENABLED = _flag("MOSS_CAMERA", False)
+CAMERA_FPS = float(os.environ.get("MOSS_CAMERA_FPS", "1"))
+CAMERA_MAX_EDGE = int(os.environ.get("MOSS_CAMERA_MAX_EDGE", "640"))
+CAMERA_JPEG_QUALITY = int(os.environ.get("MOSS_CAMERA_JPEG_QUALITY", "80"))
