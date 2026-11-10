@@ -4,41 +4,56 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MOSS - Reachy Mini</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>MOSS</h1>
-            <p class="subtitle">Reachy Mini · MOSS-Live 视听对话</p>
-        </header>
+    <div class="layout">
+        <div class="container">
+            <header>
+                <h1>MOSS</h1>
+                <p class="subtitle">Reachy Mini · MOSS-Live 视听对话</p>
+            </header>
 
-        <div class="voice-panel">
-            <div class="voice-info">
-                <span class="status-dot" id="status-dot"></span>
-                <span class="voice-status" id="status-text">连接中…</span>
+            <div class="voice-panel">
+                <div class="voice-info">
+                    <span class="status-dot" id="status-dot"></span>
+                    <span class="voice-status" id="status-text">连接中…</span>
+                </div>
+                <div class="voice-actions">
+                    <button class="remove-btn" id="mute-btn">静音麦克风</button>
+                    <button class="remove-btn" id="expressions-btn">关闭表情动作</button>
+                    <button class="remove-btn" id="camera-btn" disabled>开启视觉</button>
+                </div>
             </div>
-            <div class="voice-actions">
-                <button class="remove-btn" id="mute-btn">静音麦克风</button>
-                <button class="remove-btn" id="expressions-btn">关闭表情动作</button>
-                <button class="remove-btn" id="camera-btn" disabled>开启视觉</button>
+
+            <div class="status-bar" id="expression-status">表情动作准备中…</div>
+            <div class="status-bar" id="camera-status">视觉未开启</div>
+            <div class="camera-panel" id="camera-panel" hidden>
+                <img id="camera-preview" alt="Reachy Mini 机身摄像头的当前画面" />
+                <p>Reachy Mini 机身摄像头 · 开启视觉时画面发送到 MOSS</p>
             </div>
+
+            <div class="chat-window" id="chat-window">
+                <div class="message system">
+                    <span class="content">对着机器人说话即可，语音识别与回复都在 MOSS-Live 服务端完成。</span>
+                </div>
+            </div>
+
+            <div class="status-bar" id="latency"></div>
         </div>
 
-        <div class="status-bar" id="expression-status">表情动作准备中…</div>
-        <div class="status-bar" id="camera-status">视觉未开启</div>
-        <div class="camera-panel" id="camera-panel" hidden>
-            <img id="camera-preview" alt="Reachy Mini 机身摄像头的当前画面" />
-            <p>Reachy Mini 机身摄像头 · 开启视觉时画面发送到 MOSS</p>
-        </div>
-
-        <div class="chat-window" id="chat-window">
-            <div class="message system">
-                <span class="content">对着机器人说话即可，语音识别与回复都在 MOSS-Live 服务端完成。</span>
+        <aside class="settings" id="settings" hidden>
+            <div class="settings-head">
+                <h2>设置</h2>
+                <span class="settings-note" id="settings-note">改动立即生效并保存</span>
             </div>
-        </div>
-
-        <div class="status-bar" id="latency"></div>
+            <div id="settings-groups"></div>
+            <div class="settings-foot">
+                <button class="remove-btn" id="restart-btn">重启 MOSS</button>
+                <button class="remove-btn danger" id="stop-btn">停止并休眠</button>
+            </div>
+        </aside>
     </div>
 
     <script src="/static/main.js"></script>
