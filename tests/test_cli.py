@@ -54,6 +54,66 @@ class Services:
         return [route for method, route in self.calls if method == "POST"]
 
 
+class Robot(Services):
+    """The daemon, the app's page and the robot itself, as far as stopping goes.
+
+    Follows reachy_mini 1.8.4. Asked to stop an app, the daemon waits for it to
+    exit, then turns the motors on and moves the robot to its zero pose. That
+    leaves its reported motor mode stale, and setting the mode it already
+    reports does nothing.
+    """
+
+    def __init__(self, app=None, *, page=None, obeys=True):
+        super().__init__(app=app)
+        self.page = app is not None if page is None else page  # Does the app's page answer?
+        self.obeys = obeys  # Does the app exit when its page asks it to?
+        self.asleep, self.torque, self.mode = False, True, "enabled"
+        self.sleep_fails = False
+
+    def app_exits(self):
+        # mossy puts the robot to sleep and releases the motors on its way out.
+        self.page, self.asleep, self.torque, self.mode = False, True, False, "disabled"
+
+    def request(self, route, *, base=None, method="GET", optional=False):
+        if route in ("/state", "/api/app/stop") and not self.page:
+            self.calls.append((method, route))
+            return None  # Nothing listens on the page's port.
+        if (method, route) == ("POST", "/api/app/stop"):
+            self.calls.append((method, route))
+            if self.obeys:
+                self.app_exits()
+                self.app = self.app and {**self.app, "state": "done"}
+            return {"action": "stop"}
+        if (method, route) == ("POST", "/api/apps/stop-current-app"):
+            self.calls.append((method, route))
+            if self.app and self.app["state"] != "error":
+                self.app_exits()
+            self.app, self.page = None, False
+            self.asleep, self.torque = False, True  # Back to the zero pose, mode unchanged.
+            return None
+        if method == "POST" and route.startswith("/api/motors/set_mode/"):
+            self.calls.append((method, route))
+            mode = route.rsplit("/", 1)[1]
+            if mode != self.mode:
+                self.mode, self.torque = mode, mode == "enabled"
+            return {"status": mode}
+        if (method, route) == ("POST", "/api/move/play/goto_sleep"):
+            self.calls.append((method, route))
+            if self.sleep_fails:
+                raise cli.StartupError("接口 /api/move/play/goto_sleep 返回 HTTP 503。")
+            assert self.torque, "the robot cannot move with its motors off"
+            self.asleep = True
+            return {"uuid": "sleep-move"}
+        if (method, route) == ("GET", "/api/move/running"):
+            self.calls.append((method, route))
+            return []
+        return super().request(route, base=base, method=method, optional=optional)
+
+    @property
+    def resting(self):
+        return self.asleep and not self.torque
+
+
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.launcher = cli
@@ -317,47 +377,92 @@ class ServiceCommandTests(CommandTests):
         opened = (seen[0].restart, seen[0].no_browser, seen[0].page)
         self.assertEqual(opened, (False, False, "#settings"))
 
-    def test_stop_and_end_stop_only_mossy(self):
+    def stop(self, robot, *argv):
+        """Run ``mossy stop`` against a simulated daemon, page and robot."""
+        now = [0.0]
+        with patch.object(cli, "request", robot.request):
+            with patch.object(cli, "installed_app", return_value={"port": 7863}):
+                with patch.object(cli.time, "monotonic", side_effect=lambda: now[0]):
+                    with patch.object(
+                        cli.time, "sleep", side_effect=lambda dt: now.__setitem__(0, now[0] + dt)
+                    ):
+                        return self.run_cli(*(argv or ("stop",)))
+
+    def test_stop_and_end_leave_the_robot_asleep_with_its_motors_released(self):
         for command in ("stop", "end"):
             with self.subTest(command=command):
-                services = Services(app={"info": {"name": "mossy"}, "state": "running"})
-                with patch.object(cli, "request", services.request):
-                    code, output, _ = self.run_cli(command)
+                robot = Robot(app={"info": {"name": "mossy"}, "state": "running"})
+                code, output, _ = self.stop(robot, command)
                 self.assertEqual(code, 0)
-                self.assertEqual(services.posts, ["/api/apps/stop-current-app"])
-                self.assertIn("已停止", output)
+                self.assertTrue(robot.resting)
+                # Asked to stop the app, the daemon would wake the robot again.
+                self.assertEqual(robot.posts, ["/api/app/stop"])
+                self.assertIn("休眠", output)
+
+    def test_an_app_that_cannot_be_asked_is_stopped_by_the_daemon_then_put_to_sleep(self):
+        for state in ("starting", "running", "error"):
+            with self.subTest(state=state):
+                robot = Robot(app={"info": {"name": "mossy"}, "state": state}, page=False)
+                code, _, _ = self.stop(robot)
+                self.assertEqual(code, 0)
+                self.assertTrue(robot.resting)
+                self.assertIsNone(robot.app)
+                self.assertEqual(robot.mode, "disabled")
+
+    def test_an_app_that_does_not_exit_when_asked_is_stopped_by_the_daemon(self):
+        robot = Robot(app={"info": {"name": "mossy"}, "state": "running"}, obeys=False)
+        code, _, _ = self.stop(robot)
+        self.assertEqual(code, 0)
+        self.assertTrue(robot.resting)
+        self.assertEqual(robot.posts[:2], ["/api/app/stop", "/api/apps/stop-current-app"])
+
+    def test_an_app_run_in_a_terminal_is_stopped_through_its_page(self):
+        robot = Robot(app=None, page=True)  # The daemon manages no app, yet a page answers.
+        code, output, _ = self.stop(robot)
+        self.assertEqual(code, 0)
+        self.assertTrue(robot.resting)
+        self.assertEqual(robot.posts, ["/api/app/stop"])
+        self.assertIn("已停止", output)
+
+    def test_a_robot_that_cannot_be_put_back_to_sleep_is_reported(self):
+        robot = Robot(app={"info": {"name": "mossy"}, "state": "running"}, page=False)
+        robot.sleep_fails = True
+        code, output, _ = self.stop(robot)
+        self.assertEqual(code, 0)  # The app did stop.
+        self.assertIsNone(robot.app)
+        self.assertIn("HTTP 503", output)
 
     def test_stop_leaves_other_apps_and_finished_apps_alone(self):
-        other = Services(app={"info": {"name": "another_app"}, "state": "running"})
-        with patch.object(cli, "request", other.request):
-            code, _, errors = self.run_cli("stop")
+        other = Robot(app={"info": {"name": "another_app"}, "state": "running"})
+        code, _, errors = self.stop(other)
         self.assertEqual((code, other.posts), (1, []))
         self.assertIn("another_app", errors)
         for app in (None, {"info": {"name": "mossy"}, "state": "done"}):
             with self.subTest(app=app):
-                services = Services(app=app)
-                with patch.object(cli, "request", services.request):
-                    code, output, _ = self.run_cli("stop")
-                self.assertEqual((code, services.posts), (0, []))
+                robot = Robot(app=app, page=False)
+                code, output, _ = self.stop(robot)
+                self.assertEqual(code, 0)
                 self.assertIn("没有在运行", output)
+                # Nothing answered on the page's port, and the daemon was not asked to act.
+                self.assertEqual(robot.posts, ["/api/app/stop"])
+                self.assertEqual((robot.app, robot.asleep, robot.torque), (app, False, True))
 
     def stop_daemon(self, command_line):
         """Run ``mossy stop --daemon`` with process 4242 looking like ``command_line``."""
-        services = Services(app=None)
+        robot = Robot(app=None, page=False)
         alive = [command_line]
         with tempfile.TemporaryDirectory() as temp:
             (Path(temp) / "reachy-daemon.pid").write_text("4242\n")
             with patch.object(cli, "STATE", Path(temp)):
-                with patch.object(cli, "request", services.request):
+                with patch.object(
+                    cli.subprocess, "run", side_effect=lambda *a, **k: Mock(stdout=alive[0])
+                ):
                     with patch.object(
-                        cli.subprocess, "run", side_effect=lambda *a, **k: Mock(stdout=alive[0])
-                    ):
-                        with patch.object(
-                            cli.os,
-                            "kill",
-                            side_effect=lambda pid, sig: alive.clear() or alive.append(""),
-                        ) as kill:
-                            code, _, _ = self.run_cli("stop", "--daemon")
+                        cli.os,
+                        "kill",
+                        side_effect=lambda pid, sig: alive.clear() or alive.append(""),
+                    ) as kill:
+                        code, _, _ = self.stop(robot, "stop", "--daemon")
         self.assertEqual(code, 0)
         return [call.args[0] for call in kill.call_args_list]
 

@@ -86,9 +86,10 @@ keeping the page open.
 mossy stop
 ```
 
-puts the robot to sleep and closes the MOSS-Live session. MOSS-Live bills from session
-attachment until the WebSocket closes; muting or closing the browser keeps the session
-connected. To end forgotten sessions automatically, set `MOSS_IDLE_SHUTDOWN_MIN`. See the
+puts the robot to sleep, releases its motors and closes the MOSS-Live session. MOSS-Live
+bills from session attachment until the WebSocket closes; muting or closing the browser
+keeps the session connected. To end forgotten sessions automatically, set
+`MOSS_IDLE_SHUTDOWN_MIN`. See the
 [MOSS-Live guide](https://platform.moss.cn/docs/scenarios/moss-live/) for session and
 billing behaviour.
 
@@ -145,8 +146,11 @@ panel's switches are the saved defaults.
 
 `mossy install` puts mossy into the app environment that Reachy Mini Control uses, so it
 also appears in Control's installed apps list and in the running daemon's dashboard at
-<http://127.0.0.1:8000/>. Starting and stopping it there is equivalent to `mossy start`
-and `mossy stop`. On other Reachy deployment types, install into the matching app
+<http://127.0.0.1:8000/>. Starting it there is equivalent to `mossy start`. Stopping it
+there also ends the conversation, but the daemon then moves the robot back to its upright
+zero pose with the motors on, as it does after stopping any app. `mossy stop` and the
+page's stop button ask mossy to exit by itself, which leaves the robot asleep with its
+motors released. On other Reachy deployment types, install into the matching app
 environment with `uv pip install --python <its python> .`.
 
 ## Running in a terminal

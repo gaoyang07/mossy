@@ -32,6 +32,7 @@ STATE = Path.home() / ".local/state/mossy"
 DAEMON = "http://127.0.0.1:8000"
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 STARTUP_TIMEOUT = 180  # A first GStreamer registry scan can take over a minute.
+STOP_TIMEOUT = 40  # Going to sleep takes the app about five seconds.
 POLL_SECONDS = 0.2
 # reachy_mini.daemon.utils.CAMERA_SOCKET_PATH. The SDK plays and records on the
 # audio device directly only while the daemon offers this camera socket; without
@@ -365,15 +366,63 @@ def daemon_pid() -> int | None:
     return pid if "reachy_mini.daemon.app.main" in listing.stdout else None
 
 
-def cmd_stop(args: argparse.Namespace) -> int:
-    """Stop mossy: the robot goes to sleep and the MOSS-Live session closes."""
+def sleep_robot() -> None:
+    """Put the robot to sleep through the daemon and release its motors.
+
+    This is the daemon's own sequence when it stops. Asking for "enabled" first
+    matters: the daemon can turn the motors on without updating the mode it
+    reports, and it ignores a request for the mode it already reports.
+    """
+    request("/api/motors/set_mode/enabled", method="POST")
+    move = request("/api/move/play/goto_sleep", method="POST")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if all(running["uuid"] != move["uuid"] for running in request("/api/move/running")):
+            break
+        time.sleep(POLL_SECONDS)
+    request("/api/motors/set_mode/disabled", method="POST")
+
+
+def stop_app() -> bool:
+    """Stop mossy and leave the robot asleep; False if it was not running."""
     current = request("/api/apps/current-app-status", optional=True)
     if current and current["info"]["name"] != "mossy":
         name = safe_message(current["info"]["name"])
         raise StartupError(f"正在运行的是 {name}，不是 MOSS；没有做任何改动。")
-    if current and current["state"] not in ("done", "stopping"):
-        print("正在停止 MOSS，机器人会先回到休眠姿态…", flush=True)
-        request("/api/apps/stop-current-app", method="POST")
+    managed = bool(current) and current["state"] not in ("done", "stopping")
+    # Asked to stop an app, the daemon waits for it to exit and then moves the
+    # robot back to its zero pose with the motors on. mossy puts the robot to
+    # sleep on its own way out, so ask it through its page instead; the daemon
+    # leaves the robot of an app that ended by itself alone.
+    try:
+        page = f"http://127.0.0.1:{installed_app()['port']}"
+        asked = request("/api/app/stop", base=page, method="POST", optional=True) is not None
+    except (StartupError, subprocess.TimeoutExpired, ValueError):
+        asked = False  # Not installed there, or an app from before the page could stop it.
+    if not asked and not managed:
+        return False
+    print("正在停止 MOSS，机器人会回到休眠姿态…", flush=True)
+    deadline = time.monotonic() + STOP_TIMEOUT
+    while asked and time.monotonic() < deadline:
+        current = request("/api/apps/current-app-status", optional=True) if managed else None
+        exited = not current or current["state"] in ("done", "error")
+        if exited and request("/state", base=page, optional=True) is None:
+            return True
+        time.sleep(POLL_SECONDS)
+    if not managed:
+        raise StartupError(f"MOSS 没有在 {STOP_TIMEOUT} 秒内退出；请在运行它的终端里按 Ctrl+C。")
+    print("MOSS 没有自己退出，改由 Reachy 后台停止，再让机器人重新休眠…", flush=True)
+    request("/api/apps/stop-current-app", method="POST")
+    try:
+        sleep_robot()
+    except StartupError as exc:
+        print("没能让机器人回到休眠姿态：" + safe_message(exc), flush=True)
+    return True
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    """Stop mossy: the robot goes to sleep and the MOSS-Live session closes."""
+    if stop_app():
         print("MOSS 已停止，云端会话已关闭。", flush=True)
     else:
         print("MOSS 没有在运行。", flush=True)
