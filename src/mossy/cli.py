@@ -4,8 +4,9 @@ This module needs only the standard library, so it can run from a bare checkout
 with any Python and install the app. Commands that read settings or talk to the
 MOSS platform import the rest of the package when they run.
 
-The Reachy daemon owns the robot and runs mossy as one of its apps. Starting and
-stopping therefore go through the daemon's local HTTP API.
+The Reachy daemon owns the robot and runs mossy as one of its apps, so starting
+goes through the daemon's local HTTP API. Stopping asks mossy itself to exit,
+then terminates the daemon if ``mossy start`` was what launched it.
 """
 
 import argparse
@@ -33,6 +34,7 @@ DAEMON = "http://127.0.0.1:8000"
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 STARTUP_TIMEOUT = 180  # A first GStreamer registry scan can take over a minute.
 STOP_TIMEOUT = 40  # Going to sleep takes the app about five seconds.
+DAEMON_STOP_TIMEOUT = 30  # The daemon's sleep routine comes first: about six seconds.
 POLL_SECONDS = 0.2
 # reachy_mini.daemon.utils.CAMERA_SOCKET_PATH. The SDK plays and records on the
 # audio device directly only while the daemon offers this camera socket; without
@@ -339,7 +341,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             print(
                 "提示：Reachy 后台启动时没有找到机器人摄像头，音频改走后台的 WebRTC 中转"
                 "（多一次编解码，打断也更慢）。机器人通电后运行 "
-                "mossy stop --daemon && mossy start 可恢复直连。",
+                "mossy stop && mossy start 可恢复直连。",
                 flush=True,
             )
         if not args.no_browser:
@@ -386,10 +388,23 @@ def sleep_robot() -> None:
 def stop_app() -> bool:
     """Stop mossy and leave the robot asleep; False if it was not running."""
     current = request("/api/apps/current-app-status", optional=True)
-    if current and current["info"]["name"] != "mossy":
+    if current and current["info"]["name"] == "mossy" and current["state"] == "stopping":
+        # Begun elsewhere, in the daemon's dashboard for one. The daemon is waiting
+        # for mossy to exit and then moves the robot; mossy runs until that is over.
+        print("Reachy 后台正在停止 MOSS，等它完成…", flush=True)
+        deadline = time.monotonic() + STOP_TIMEOUT
+        while current and current["state"] == "stopping":
+            if time.monotonic() >= deadline:
+                raise StartupError(
+                    f"Reachy 后台没有在 {STOP_TIMEOUT} 秒内停下 MOSS；没有做任何改动。"
+                )
+            time.sleep(POLL_SECONDS)
+            current = request("/api/apps/current-app-status", optional=True)
+    # An app that ran to its end is still listed, but nothing of it is left to disturb.
+    if current and current["info"]["name"] != "mossy" and current["state"] != "done":
         name = safe_message(current["info"]["name"])
         raise StartupError(f"正在运行的是 {name}，不是 MOSS；没有做任何改动。")
-    managed = bool(current) and current["state"] not in ("done", "stopping")
+    managed = bool(current) and current["state"] != "done"
     # Asked to stop an app, the daemon waits for it to exit and then moves the
     # robot back to its zero pose with the motors on. mossy puts the robot to
     # sleep on its own way out, so ask it through its page instead; the daemon
@@ -420,25 +435,61 @@ def stop_app() -> bool:
     return True
 
 
+def stop_daemon(pid: int) -> None:
+    """Terminate the daemon that ``mossy start`` launched and wait until it is gone.
+
+    SIGTERM is the daemon's own graceful shutdown: it releases the media devices,
+    runs its sleep routine (the chime and a five-second wait even when the robot
+    already sleeps), releases the motors and exits. Its HTTP API reporting
+    "stopped" is not that; the process and its listener outlive it.
+    """
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass  # It exited between being found and being signaled.
+    deadline = time.monotonic() + DAEMON_STOP_TIMEOUT
+    while daemon_pid() is not None:
+        if time.monotonic() >= deadline:
+            raise StartupError(
+                f"Reachy 后台（进程 {pid}）在 {DAEMON_STOP_TIMEOUT} 秒内没有退出，仍在运行；"
+                "可以稍后再运行 mossy stop，或用 mossy logs 查看它停在哪里。"
+            )
+        time.sleep(POLL_SECONDS)
+    (STATE / "reachy-daemon.pid").unlink(missing_ok=True)
+
+
 def cmd_stop(args: argparse.Namespace) -> int:
-    """Stop mossy: the robot goes to sleep and the MOSS-Live session closes."""
+    """Stop mossy, then shut down the Reachy daemon if ``mossy start`` launched it."""
     if stop_app():
         print("MOSS 已停止，云端会话已关闭。", flush=True)
     else:
         print("MOSS 没有在运行。", flush=True)
-    if args.daemon:
-        pid = daemon_pid()
-        if pid is None:
-            print("Reachy 后台不是由 mossy 启动的（或已退出），请在 Reachy Mini Control 中管理。")
-            return 0
-        os.kill(pid, signal.SIGTERM)  # The daemon puts the robot to sleep on its way out.
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and daemon_pid() is not None:
-            time.sleep(POLL_SECONDS)
-        if daemon_pid() is not None:
-            raise StartupError(f"Reachy 后台（进程 {pid}）没有在 20 秒内退出。")
-        (STATE / "reachy-daemon.pid").unlink(missing_ok=True)
-        print("Reachy 后台已停止。", flush=True)
+    # Only now: mossy needs the daemon until it has put the robot to sleep, and
+    # stop_app() raises rather than returns while any app is still running.
+    pid = daemon_pid()
+    if pid is None:
+        if request("/api/daemon/status", optional=True) is None:
+            print("Reachy 后台没有在运行。", flush=True)
+        else:
+            print(
+                "Reachy 后台不是由 mossy 启动的，保持运行；"
+                "请在启动它的程序（例如 Reachy Mini Control）里关闭。",
+                flush=True,
+            )
+    elif args.keep_daemon:
+        print(
+            f"按 --keep-daemon 保留了 Reachy 后台（进程 {pid}）；"
+            "它继续持有机器人的媒体设备，mossy stop 可以关闭它。",
+            flush=True,
+        )
+    else:
+        print(
+            f"正在关闭 Reachy 后台（进程 {pid}）并等它退出；它还连着机器人时会先执行"
+            "自己的休眠流程，提示音会再响一次，约需 6 秒…",
+            flush=True,
+        )
+        stop_daemon(pid)
+        print("Reachy 后台已退出，不再占用机器人的媒体设备。", flush=True)
     return 0
 
 
@@ -783,7 +834,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if CAMERA_SOCKET.exists():
             report(True, "音频通路", "本机直连")
         else:
-            report(None, "音频通路", "WebRTC 中转；机器人通电后 mossy stop --daemon && mossy start")
+            report(None, "音频通路", "WebRTC 中转；机器人通电后 mossy stop && mossy start")
     if app:
         state = request("/state", base=f"http://127.0.0.1:{app['port']}", optional=True)
         if state is None:
@@ -841,8 +892,26 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--restart", action="store_true", help="等同于 mossy restart")
         else:
             command.set_defaults(restart=True)
-    stop = add("stop", cmd_stop, "停止 MOSS：机器人休眠并关闭云端会话", aliases=["end"])
-    stop.add_argument("--daemon", action="store_true", help="同时停止由 mossy 启动的 Reachy 后台")
+    stop = add(
+        "stop",
+        cmd_stop,
+        "停止 MOSS 并关闭由 mossy 启动的 Reachy 后台：机器人休眠，云端会话关闭，媒体设备释放",
+        aliases=["end"],
+    )
+    daemon = stop.add_mutually_exclusive_group()
+    daemon.add_argument(
+        "--keep-daemon",
+        action="store_true",
+        help="只停止 MOSS，保留 Reachy 后台：下次启动更快，但后台继续持有机器人的媒体设备",
+    )
+    daemon.add_argument(
+        "--daemon", action="store_true", help="旧用法，现在是默认行为：同时关闭 Reachy 后台"
+    )
+    stop.epilog = (
+        "只会关闭 mossy start 自己启动的 Reachy 后台，并等它的进程退出。"
+        "由 Reachy Mini Control 或其他程序启动的后台保持运行，命令会说明它被保留；"
+        "正在运行其他应用时不做任何改动。"
+    )
     status = add("status", cmd_status, "查看后台、应用、会话和实测延迟")
     status.add_argument("--json", action="store_true", help="输出 JSON")
     add("gui", cmd_gui, "打开控制页面（音色、姿态、API 参数）；未运行时先启动")
