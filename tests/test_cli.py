@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -54,27 +55,77 @@ class Services:
         return [route for method, route in self.calls if method == "POST"]
 
 
+DAEMON_COMMAND = "/runtime/.venv/bin/python3 -m reachy_mini.daemon.app.main --desktop-app-daemon"
+
+
 class Robot(Services):
     """The daemon, the app's page and the robot itself, as far as stopping goes.
 
     Follows reachy_mini 1.8.4. Asked to stop an app, the daemon waits for it to
     exit, then turns the motors on and moves the robot to its zero pose. That
     leaves its reported motor mode stale, and setting the mode it already
-    reports does nothing.
+    reports does nothing. Told to terminate, the daemon puts the robot to sleep
+    and releases the motors before its process goes away.
+
+    ``owned`` says whether ``mossy start`` launched the daemon: then it is
+    process 4242 and the PID record names it. Otherwise it is process 9000,
+    started by something else, and there is no record.
     """
 
-    def __init__(self, app=None, *, page=None, obeys=True):
+    def __init__(self, app=None, *, page=None, obeys=True, owned=False):
         super().__init__(app=app)
         self.page = app is not None if page is None else page  # Does the app's page answer?
         self.obeys = obeys  # Does the app exit when its page asks it to?
         self.asleep, self.torque, self.mode = False, True, "enabled"
         self.sleep_fails = False
+        self.now = [0.0]  # The clock the command sees; its sleeps advance it.
+        self.processes = {4242 if owned else 9000: DAEMON_COMMAND}  # What ps shows.
+        self.record = "4242\n" if owned else None  # What the PID record holds.
+        self.state = None  # The state directory, once the command has run.
+        self.signals = []  # (pid, signal) that reached a process.
+        self.shutdown_seconds = 6.0  # From SIGTERM to gone; None never exits.
+        self.vanishes = False  # Does the daemon exit just before it is signaled?
+        self.exits_at = None
+        self.stopped_at = None  # When the daemon ends a stop begun elsewhere; None never.
+
+    def daemon_exits(self):
+        self.processes = {p: c for p, c in self.processes.items() if c != DAEMON_COMMAND}
+        if self.daemon and self.daemon["state"] == "running":
+            self.asleep, self.torque, self.mode = True, False, "disabled"
+        self.daemon = self.app = self.exits_at = None  # Its HTTP API is gone too.
+
+    def ps(self, argv, **kwargs):
+        if self.exits_at is not None and self.now[0] >= self.exits_at:
+            self.daemon_exits()
+        command = self.processes.get(int(argv[argv.index("-p") + 1]), "")
+        return Mock(stdout=command and command + "\n", returncode=0 if command else 1)
+
+    def kill(self, pid, sig):
+        if self.vanishes:
+            self.daemon_exits()
+        if pid not in self.processes:
+            raise ProcessLookupError(3, "No such process")
+        assert self.processes[pid] == DAEMON_COMMAND, "an unrelated process was signaled"
+        assert pid == 4242, "a daemon that mossy did not start was signaled"
+        still_running = self.page or (self.app and self.app["state"] not in ("done", "error"))
+        assert not still_running, "the daemon was signaled while an app was still running"
+        self.signals.append((pid, sig))
+        if self.shutdown_seconds is not None and self.exits_at is None:
+            self.exits_at = self.now[0] + self.shutdown_seconds
+
+    @property
+    def recorded(self):
+        return (self.state / "reachy-daemon.pid").exists()
 
     def app_exits(self):
         # mossy puts the robot to sleep and releases the motors on its way out.
         self.page, self.asleep, self.torque, self.mode = False, True, False, "disabled"
 
     def request(self, route, *, base=None, method="GET", optional=False):
+        stopping = self.app and self.app["state"] == "stopping"
+        if stopping and self.stopped_at is not None and self.now[0] >= self.stopped_at:
+            self.app, self.page = None, False
+            self.asleep, self.torque = False, True  # The daemon's zero pose, motors on.
         if route in ("/state", "/api/app/stop") and not self.page:
             self.calls.append((method, route))
             return None  # Nothing listens on the page's port.
@@ -342,6 +393,18 @@ class LauncherTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def setUp(self):
+        # A test must never read the real PID record or signal a real process.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        real = AssertionError("a real process would have been signaled")
+        for patcher in (
+            patch.object(cli, "STATE", Path(directory.name)),
+            patch.object(cli.os, "kill", side_effect=real),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def run_cli(self, *argv):
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
@@ -360,9 +423,11 @@ class ServiceCommandTests(CommandTests):
                 self.assertEqual(code, 0)
                 for command in ("start", "stop", "end", "restart", "status", "gui", "config"):
                     self.assertIn(command, output)
-        code, output, _ = self.run_cli("help", "stop")
-        self.assertEqual(code, 0)
-        self.assertIn("--daemon", output)
+        for command in ("stop", "end"):
+            code, output, _ = self.run_cli("help", command)
+            self.assertEqual(code, 0)
+            self.assertIn("--keep-daemon", output)
+            self.assertIn("--daemon", output)
 
     def test_start_restart_and_gui_share_the_start_flow(self):
         parser = cli.build_parser()
@@ -378,15 +443,27 @@ class ServiceCommandTests(CommandTests):
         self.assertEqual(opened, (False, False, "#settings"))
 
     def stop(self, robot, *argv):
-        """Run ``mossy stop`` against a simulated daemon, page and robot."""
-        now = [0.0]
-        with patch.object(cli, "request", robot.request):
-            with patch.object(cli, "installed_app", return_value={"port": 7863}):
-                with patch.object(cli.time, "monotonic", side_effect=lambda: now[0]):
-                    with patch.object(
-                        cli.time, "sleep", side_effect=lambda dt: now.__setitem__(0, now[0] + dt)
-                    ):
-                        return self.run_cli(*(argv or ("stop",)))
+        """Run ``mossy stop`` against a simulated daemon, page, robot and process table."""
+        if robot.state is None:
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            robot.state = Path(directory.name)
+            if robot.record is not None:
+                (robot.state / "reachy-daemon.pid").write_text(robot.record)
+        now = robot.now
+        patches = (
+            patch.object(cli, "request", robot.request),
+            patch.object(cli, "installed_app", return_value={"port": 7863}),
+            patch.object(cli, "STATE", robot.state),
+            patch.object(cli.subprocess, "run", side_effect=robot.ps),
+            patch.object(cli.os, "kill", side_effect=robot.kill),
+            patch.object(cli.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(cli.time, "sleep", side_effect=lambda dt: now.__setitem__(0, now[0] + dt)),
+        )
+        with contextlib.ExitStack() as stack:
+            for each in patches:
+                stack.enter_context(each)
+            return self.run_cli(*(argv or ("stop",)))
 
     def test_stop_and_end_leave_the_robot_asleep_with_its_motors_released(self):
         for command in ("stop", "end"):
@@ -447,29 +524,199 @@ class ServiceCommandTests(CommandTests):
                 self.assertEqual(robot.posts, ["/api/app/stop"])
                 self.assertEqual((robot.app, robot.asleep, robot.torque), (app, False, True))
 
-    def stop_daemon(self, command_line):
-        """Run ``mossy stop --daemon`` with process 4242 looking like ``command_line``."""
-        robot = Robot(app=None, page=False)
-        alive = [command_line]
-        with tempfile.TemporaryDirectory() as temp:
-            (Path(temp) / "reachy-daemon.pid").write_text("4242\n")
-            with patch.object(cli, "STATE", Path(temp)):
-                with patch.object(
-                    cli.subprocess, "run", side_effect=lambda *a, **k: Mock(stdout=alive[0])
-                ):
-                    with patch.object(
-                        cli.os,
-                        "kill",
-                        side_effect=lambda pid, sig: alive.clear() or alive.append(""),
-                    ) as kill:
-                        code, _, _ = self.stop(robot, "stop", "--daemon")
-        self.assertEqual(code, 0)
-        return [call.args[0] for call in kill.call_args_list]
+    def test_stop_and_end_stop_mossy_and_then_the_daemon_that_mossy_started(self):
+        for argv in (("stop",), ("end",), ("stop", "--daemon"), ("end", "--daemon")):
+            with self.subTest(argv=argv):
+                robot = Robot(app={"info": {"name": "mossy"}, "state": "running"}, owned=True)
+                code, output, errors = self.stop(robot, *argv)
+                self.assertEqual((code, errors), (0, ""))
+                # mossy was asked to exit by itself, so the robot went to sleep
+                # once; the simulated kill refuses a signal while it still runs.
+                self.assertEqual(robot.posts, ["/api/app/stop"])
+                self.assertTrue(robot.resting)
+                self.assertEqual(robot.signals, [(4242, signal.SIGTERM)])
+                self.assertEqual(robot.processes, {})
+                self.assertFalse(robot.recorded)
+                self.assertIn("MOSS 已停止", output)
+                self.assertIn("后台已退出", output)
 
-    def test_stopping_the_daemon_signals_only_the_process_this_command_started(self):
-        self.assertEqual(self.stop_daemon("python3 -m reachy_mini.daemon.app.main"), [4242])
-        # The recorded process ID now belongs to something else.
-        self.assertEqual(self.stop_daemon("vim notes.txt"), [])
+    def test_success_is_reported_only_once_the_daemon_process_is_gone(self):
+        robot = Robot(app={"info": {"name": "mossy"}, "state": "running"}, owned=True)
+        robot.shutdown_seconds = 14.0  # Still within the time it is given.
+        code, output, _ = self.stop(robot)
+        self.assertEqual(code, 0)
+        self.assertGreaterEqual(robot.now[0], 14.0)
+        self.assertEqual(robot.processes, {})
+
+    def test_an_owned_daemon_is_shut_down_when_mossy_is_done_or_absent(self):
+        done = {"info": {"name": "mossy"}, "state": "done"}
+        for app, daemon_state in ((done, "running"), (None, "running"), (done, "stopped")):
+            with self.subTest(app=app, daemon=daemon_state):
+                robot = Robot(app=app, page=False, owned=True)
+                robot.daemon["state"] = daemon_state  # "stopped" still has a live process.
+                code, output, _ = self.stop(robot)
+                self.assertEqual(code, 0)
+                self.assertIn("MOSS 没有在运行", output)
+                self.assertEqual(robot.signals, [(4242, signal.SIGTERM)])
+                self.assertEqual(robot.processes, {})
+                self.assertFalse(robot.recorded)
+                self.assertIn("后台已退出", output)
+                if daemon_state == "running":
+                    # Left upright earlier, the robot is put to sleep by the daemon.
+                    self.assertTrue(robot.resting)
+
+    def test_a_silent_daemon_that_mossy_started_is_shut_down_too(self):
+        robot = Robot(app=None, page=False, owned=True)
+        robot.daemon = None  # Its process lives, but nothing answers on its port.
+        code, output, _ = self.stop(robot)
+        self.assertEqual(code, 0)
+        self.assertEqual((robot.signals, robot.processes), ([(4242, signal.SIGTERM)], {}))
+
+    def test_keep_daemon_stops_only_mossy(self):
+        for argv in (("stop", "--keep-daemon"), ("end", "--keep-daemon")):
+            with self.subTest(argv=argv):
+                robot = Robot(app={"info": {"name": "mossy"}, "state": "running"}, owned=True)
+                code, output, _ = self.stop(robot, *argv)
+                self.assertEqual(code, 0)
+                self.assertTrue(robot.resting)
+                self.assertEqual(robot.signals, [])
+                self.assertEqual(robot.processes, {4242: DAEMON_COMMAND})
+                self.assertTrue(robot.recorded)
+                self.assertIn("保留", output)
+                self.assertNotIn("后台已退出", output)
+
+    def test_contradictory_daemon_options_are_refused_before_anything_is_touched(self):
+        for argv in (("stop", "--daemon", "--keep-daemon"), ("end", "--keep-daemon", "--daemon")):
+            with self.subTest(argv=argv):
+                robot = Robot(app={"info": {"name": "mossy"}, "state": "running"}, owned=True)
+                code, _, errors = self.stop(robot, *argv)
+                self.assertEqual(code, 2)
+                self.assertIn("not allowed with", errors)  # Both are known; together they clash.
+                self.assertEqual((robot.calls, robot.signals), ([], []))
+                self.assertTrue(robot.recorded)
+
+    def test_stopping_again_changes_nothing(self):
+        robot = Robot(app={"info": {"name": "mossy"}, "state": "running"}, owned=True)
+        self.assertEqual(self.stop(robot)[0], 0)
+        for command in ("stop", "end"):
+            code, output, errors = self.stop(robot, command)
+            self.assertEqual((code, errors), (0, ""))
+            self.assertIn("MOSS 没有在运行", output)
+            self.assertIn("后台没有在运行", output)
+        self.assertEqual(robot.signals, [(4242, signal.SIGTERM)])
+
+    def test_a_daemon_that_exits_just_before_the_signal_counts_as_shut_down(self):
+        robot = Robot(app=None, page=False, owned=True)
+        robot.vanishes = True
+        code, output, errors = self.stop(robot)
+        self.assertEqual((code, errors), (0, ""))
+        self.assertEqual((robot.signals, robot.processes), ([], {}))
+        self.assertFalse(robot.recorded)
+
+    def test_a_stale_or_foreign_pid_record_never_leads_to_a_signal(self):
+        cases = {
+            "the recorded process is gone": ("4242\n", {}),
+            "the number now belongs to something else": ("4242\n", {4242: "vim notes.txt"}),
+            "the record is not a number": ("soon\n", {4242: DAEMON_COMMAND}),
+        }
+        for name, (record, processes) in cases.items():
+            with self.subTest(name):
+                robot = Robot(app=None, page=False)
+                robot.record, robot.processes, robot.daemon = record, dict(processes), None
+                code, output, errors = self.stop(robot)
+                self.assertEqual((code, errors), (0, ""))
+                self.assertEqual(robot.signals, [])
+                self.assertEqual(robot.processes, processes)
+                self.assertIn("后台没有在运行", output)
+
+    def test_a_daemon_started_elsewhere_is_left_running_and_reported_as_kept(self):
+        for record in (None, "4242\n"):  # No record, or one left by a daemon long gone.
+            with self.subTest(record=record):
+                robot = Robot(app={"info": {"name": "mossy"}, "state": "running"})
+                robot.record = record
+                code, output, errors = self.stop(robot)
+                self.assertEqual((code, errors), (0, ""))
+                self.assertTrue(robot.resting)  # mossy itself still stops cleanly.
+                self.assertEqual(robot.signals, [])
+                self.assertEqual(robot.processes, {9000: DAEMON_COMMAND})
+                self.assertEqual(robot.daemon["state"], "running")
+                self.assertIn("不是由 mossy 启动", output)
+                self.assertNotIn("后台已退出", output)
+
+    def test_another_robot_app_keeps_itself_and_the_daemon(self):
+        for state in ("starting", "running", "stopping", "error"):
+            with self.subTest(state=state):
+                robot = Robot(app={"info": {"name": "another_app"}, "state": state}, owned=True)
+                code, output, errors = self.stop(robot)
+                self.assertEqual(code, 1)
+                self.assertIn("another_app", errors)
+                self.assertEqual((robot.posts, robot.signals), ([], []))
+                self.assertEqual(robot.processes, {4242: DAEMON_COMMAND})
+                self.assertTrue(robot.recorded)
+
+    def test_an_app_of_another_kind_that_has_finished_does_not_hold_the_daemon_back(self):
+        finished = {"info": {"name": "another_app"}, "state": "done"}
+        robot = Robot(app=finished, page=False, owned=True)
+        code, output, errors = self.stop(robot)
+        self.assertEqual((code, errors), (0, ""))
+        self.assertIn("MOSS 没有在运行", output)
+        self.assertNotIn("/api/apps/stop-current-app", robot.posts)
+        self.assertEqual((robot.signals, robot.processes), ([(4242, signal.SIGTERM)], {}))
+        self.assertFalse(robot.recorded)
+
+    def test_a_stop_the_daemon_has_already_begun_finishes_before_the_daemon_is_signaled(self):
+        # Begun in the dashboard, say. The daemon waits for mossy to exit and then
+        # moves the robot; the simulated kill refuses a signal before that ends.
+        robot = Robot(app={"info": {"name": "mossy"}, "state": "stopping"}, page=False, owned=True)
+        robot.stopped_at = 3.0
+        code, output, errors = self.stop(robot)
+        self.assertEqual((code, errors), (0, ""))
+        self.assertGreaterEqual(robot.now[0], 3.0)
+        self.assertNotIn("/api/apps/stop-current-app", robot.posts)  # Not asked twice.
+        self.assertEqual((robot.signals, robot.processes), ([(4242, signal.SIGTERM)], {}))
+        self.assertTrue(robot.resting)  # The daemon put the robot to sleep on its way out.
+
+    def test_a_stop_that_the_daemon_never_finishes_keeps_the_daemon(self):
+        robot = Robot(app={"info": {"name": "mossy"}, "state": "stopping"}, page=False, owned=True)
+        code, output, errors = self.stop(robot)
+        self.assertEqual(code, 1)
+        self.assertIn("MOSS", errors)
+        self.assertNotIn("后台已退出", output + errors)
+        self.assertEqual((robot.signals, robot.processes), ([], {4242: DAEMON_COMMAND}))
+        self.assertTrue(robot.recorded)
+        self.assertLess(robot.now[0], 120)  # The wait is bounded.
+
+    def test_a_mossy_that_will_not_exit_keeps_the_daemon_it_depends_on(self):
+        robot = Robot(app=None, page=True, obeys=False, owned=True)  # Run in a terminal.
+        code, _, errors = self.stop(robot)
+        self.assertEqual(code, 1)
+        self.assertTrue(errors)
+        self.assertEqual(robot.signals, [])
+        self.assertTrue(robot.recorded)
+
+    def test_a_daemon_that_does_not_exit_is_a_failure_that_names_what_is_left(self):
+        robot = Robot(app={"info": {"name": "mossy"}, "state": "running"}, owned=True)
+        robot.shutdown_seconds = None
+        code, output, errors = self.stop(robot)
+        self.assertEqual(code, 1)
+        self.assertIn("4242", errors)
+        self.assertIn("仍在运行", errors)
+        self.assertNotIn("后台已退出", output + errors)
+        self.assertIn("MOSS 已停止", output)  # That part did happen.
+        self.assertEqual(robot.signals, [(4242, signal.SIGTERM)])  # Asked once, not killed.
+        self.assertEqual(robot.processes, {4242: DAEMON_COMMAND})
+        self.assertTrue(robot.recorded)
+        self.assertLess(robot.now[0], 120)  # The wait is bounded.
+
+    def test_restart_leaves_the_daemon_running(self):
+        robot = Robot(app={"info": {"name": "mossy"}, "state": "running"}, owned=True)
+        with patch.object(cli, "request", robot.request):
+            with patch.object(cli.os, "kill", side_effect=robot.kill):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    ready = cli.start("http://127.0.0.1:7863", restart=True)
+        self.assertTrue(ready["connected"])
+        self.assertEqual(robot.posts, ["/api/apps/restart-current-app"])
+        self.assertEqual((robot.signals, robot.processes), ([], {4242: DAEMON_COMMAND}))
 
     def status(self, connected):
         stats = {
@@ -537,6 +784,7 @@ class ServiceCommandTests(CommandTests):
 
 class ConfigCommandTests(CommandTests):
     def setUp(self):
+        super().setUp()
         from mossy import config
 
         directory = tempfile.TemporaryDirectory()

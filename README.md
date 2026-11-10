@@ -86,9 +86,25 @@ keeping the page open.
 mossy stop
 ```
 
-puts the robot to sleep, releases its motors and closes the MOSS-Live session. MOSS-Live
-bills from session attachment until the WebSocket closes; muting or closing the browser
-keeps the session connected. To end forgotten sessions automatically, set
+shuts everything down, and `mossy end` is the same command. mossy closes the MOSS-Live
+session and puts the robot to sleep with its motors released. Then the Reachy daemon that
+`mossy start` launched is terminated, which releases the robot's microphone, speaker and
+camera. The command returns once that process has exited, about 12 seconds in all. If the
+daemon is still running 30 seconds after being told to stop, the command exits non-zero
+and names the process.
+
+The daemon runs its own sleep routine on its way out, so the robot's sleep chime plays a
+second time. To stop only mossy and leave the daemon running:
+
+```bash
+mossy stop --keep-daemon
+```
+
+The next `mossy start` is then about 2 seconds faster, and until then the daemon keeps
+the robot's microphone open.
+
+MOSS-Live bills from session attachment until the WebSocket closes; muting or closing the
+browser keeps the session connected. To end forgotten sessions automatically, set
 `MOSS_IDLE_SHUTDOWN_MIN`. See the
 [MOSS-Live guide](https://platform.moss.cn/docs/scenarios/moss-live/) for session and
 billing behaviour.
@@ -98,7 +114,7 @@ billing behaviour.
 | Command | What it does |
 | --- | --- |
 | `mossy start [--no-browser]` | Start the daemon and mossy, or reuse a healthy running conversation |
-| `mossy stop [--daemon]`, `mossy end` | Stop mossy; `--daemon` also stops a daemon that `mossy start` launched |
+| `mossy stop [--keep-daemon]`, `mossy end` | Stop mossy, then shut down the daemon that `mossy start` launched; `--keep-daemon` stops only mossy |
 | `mossy restart` | Restart mossy to load new code or settings |
 | `mossy status [--json]` | Daemon, app, session and measured latency; exits non-zero when not connected |
 | `mossy gui` | Open the page on its settings, starting mossy first if needed |
@@ -111,7 +127,12 @@ billing behaviour.
 | `mossy help [command]` | Help |
 
 The command talks to the Reachy daemon's local HTTP API. It only stops an app named
-`mossy`, and only signals a daemon process that it started itself.
+`mossy`, and only signals a daemon process that it started itself: the one recorded in
+`~/.local/state/mossy/reachy-daemon.pid`, and only while that process is still a Reachy
+daemon. A daemon started by Reachy Mini Control or anything else is left running, and
+`mossy stop` says that it was kept. While another app is running on the robot,
+`mossy stop` changes nothing. `mossy stop --daemon`, which older versions needed for the
+full shutdown, is still accepted.
 
 ## Settings page
 
@@ -154,6 +175,11 @@ zero pose with the motors on, as it does after stopping any app. `mossy stop` an
 page's stop button ask mossy to exit by itself, which leaves the robot asleep with its
 motors released. On other Reachy deployment types, install into the matching app
 environment with `uv pip install --python <its python> .`.
+
+Only `mossy stop` also ends the daemon, and only a daemon that `mossy start` launched.
+After the page's stop button, the idle shutdown or a stop from Control, the daemon keeps
+running and keeps the robot's microphone open; run `mossy stop` to shut it down. A daemon
+that Control started is Control's to stop.
 
 ## Running in a terminal
 
@@ -216,7 +242,8 @@ disabled. Frames are kept in memory for preview and are not saved by the app.
 
 Preview and camera controls are available only from a local browser on the machine
 running mossy. **关闭视觉** stops frame uploads and clears the preview; it does not
-turn off the camera hardware used by the Reachy daemon. The browser switch affects
+turn off the camera hardware used by the Reachy daemon, which `mossy stop` releases
+by shutting down the daemon it started. The browser switch affects
 the current process; use `MOSS_CAMERA` for the persistent setting.
 
 On macOS, the app launching the Reachy daemon needs Camera permission even for
@@ -319,7 +346,8 @@ Two things outside this app affect latency and are worth checking:
   daemon found the robot's camera at its own start. Otherwise both directions take a
   WebRTC detour through the daemon, with an Opus encode and decode each way and a
   blocking request on every interruption. `mossy status` shows which path is in use. To
-  get the direct path back, power the robot and run `mossy stop --daemon && mossy start`.
+  get the direct path back, power the robot and run `mossy stop && mossy start`, or
+  restart the daemon from its own launcher if `mossy start` did not launch it.
 - **Connection rotation.** MOSS-Live closes each connection on a schedule, every 10
   minutes in our logs; mossy resumes the same session on a new one. The robot does not
   hear or speak for the length of one handshake.
@@ -335,6 +363,7 @@ Start with `mossy doctor`, and `mossy logs` for the daemon and app output.
 | No reply sound | Check the robot output device and its speaker volume in the daemon dashboard. `MOSS_AUDIO_GAIN` is software gain, not the device volume. |
 | Expressions are unavailable | Run `mossy install` again as the app's OS user, which downloads the recordings, and inspect `expressions.error` in `/state`. |
 | Visual input shows no frames | Check Reachy's camera connection and the daemon launcher's Camera permission. `camera.captured_frames` reports capture, while `camera.sent_frames` reports uploads; voice can remain connected with neither. |
+| The microphone stays in use after stopping | The Reachy daemon holds the robot's audio device for as long as it runs. `mossy stop` shuts down a daemon that `mossy start` launched; `--keep-daemon`, the page's stop button and the idle shutdown leave it running. A daemon started by Reachy Mini Control is stopped from Control. |
 | Control is stuck on a permission screen | Follow the runtime's platform permission setup. The browser dashboard can manage apps only if the daemon is already running; opening it does not start the daemon. |
 
 Gesture pose limits apply before the SDK adds speech-wobble offsets;
