@@ -64,27 +64,32 @@ class Camera:
         quality: int = 80,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if not 0.5 <= fps <= 5.0:
-            raise ValueError("MOSS_CAMERA_FPS must be between 0.5 and 5")
-        if not 128 <= max_edge <= 1920:
-            raise ValueError("MOSS_CAMERA_MAX_EDGE must be between 128 and 1920")
-        if not 1 <= quality <= 95:
-            raise ValueError("MOSS_CAMERA_JPEG_QUALITY must be between 1 and 95")
         self._get_frame = get_frame
         self._submit_frame = submit_frame
         self._set_source_enabled = set_source_enabled
         self._enabled = enabled
-        self._fps, self._max_edge, self._quality = fps, max_edge, quality
         self._clock = clock
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self.configure(fps=fps, max_edge=max_edge, quality=quality)
         self._thread: threading.Thread | None = None
         self._generation = 0
         self._jpeg: bytes | None = None
         self._captured_at: float | None = None
         self._captured_frames = 0
         self._error: str | None = None
+
+    def configure(self, *, fps: float, max_edge: int, quality: int) -> None:
+        """Set the capture rate and JPEG size; takes effect from the next frame."""
+        if not 0.5 <= fps <= 5.0:
+            raise ValueError("MOSS_CAMERA_FPS must be between 0.5 and 5")
+        if not 128 <= max_edge <= 1920:
+            raise ValueError("MOSS_CAMERA_MAX_EDGE must be between 128 and 1920")
+        if not 1 <= quality <= 95:
+            raise ValueError("MOSS_CAMERA_JPEG_QUALITY must be between 1 and 95")
+        self._fps, self._max_edge, self._quality = fps, max_edge, quality
+        self._wake.set()
 
     def set_enabled(self, enabled: bool) -> None:
         with self._lock:
@@ -162,9 +167,8 @@ class Camera:
                 logger.warning("Camera input unavailable; voice continues: %s", exc)
 
     def _run(self) -> None:
-        interval = 1.0 / self._fps
         while not self._stop.is_set():
             started_at = self._clock()
             self._capture_once()
-            self._wake.wait(max(0.0, interval - (self._clock() - started_at)))
+            self._wake.wait(max(0.0, 1.0 / self._fps - (self._clock() - started_at)))
             self._wake.clear()

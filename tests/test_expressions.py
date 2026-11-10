@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from mossy.expressions import NEUTRAL, Expressions, classify_response
+from mossy.expressions import NEUTRAL, POSTURES, Expressions, classify_response
 
 
 class FakeMove:
@@ -210,6 +210,81 @@ class SchedulingTests(unittest.TestCase):
         self.assertLessEqual(angle, np.deg2rad(10) + 1e-12)
         self.assertTrue(np.all(np.abs(head[:3, 3]) <= 0.01))
         self.assertTrue(np.all(np.abs(antennas - NEUTRAL[1]) <= 0.65 + 1e-12))
+
+    def test_resting_posture_changes_smoothly_and_gestures_return_to_it(self):
+        rest_head, rest_antennas = POSTURES["relaxed"]
+        self.controller.set_posture("relaxed")
+        self.controller._handle(*self.controller._events.popleft()[:2], self.now)
+        self.controller._tick(self.now)
+        self.assertEqual(self.controller.snapshot()["posture"], "relaxed")
+        np.testing.assert_allclose(self.robot.poses[-1][0], NEUTRAL[0], atol=1e-12)
+        self.advance(0.4)
+        np.testing.assert_allclose(self.robot.poses[-1][0], rest_head, atol=1e-12)
+        np.testing.assert_allclose(self.robot.poses[-1][1], rest_antennas, atol=1e-12)
+
+        self.start_happy()
+        self.advance(0.4)
+        head, antennas = self.robot.poses[-1]
+        offset = Rotation.from_matrix(rest_head[:3, :3].T @ head[:3, :3]).magnitude()
+        self.assertGreater(offset, np.deg2rad(1))
+        self.assertLessEqual(offset, np.deg2rad(10) + 1e-12)
+        self.assertTrue(np.all(np.abs(antennas - rest_antennas) <= 0.65 + 1e-12))
+        self.event("playback.completed", self.scope)
+        self.advance(0.4)
+        np.testing.assert_allclose(self.robot.poses[-1][0], rest_head, atol=1e-12)
+        np.testing.assert_allclose(self.robot.poses[-1][1], rest_antennas, atol=1e-12)
+
+    def test_changing_posture_cancels_a_gesture_in_progress(self):
+        self.start_happy()
+        self.advance(0.2)
+        self.event("motion.posture", {"name": "curious"})
+        self.assertEqual(self.controller.snapshot()["active"], "returning")
+        self.advance(0.4)
+        np.testing.assert_allclose(self.robot.poses[-1][0], POSTURES["curious"][0], atol=1e-12)
+        self.assertIsNone(self.controller.snapshot()["active"])
+
+    def test_every_posture_stays_near_the_sdk_pose(self):
+        from mossy import config
+
+        self.assertEqual(tuple(POSTURES), config.POSTURES)
+        for name, (head, antennas) in POSTURES.items():
+            with self.subTest(posture=name):
+                angle = Rotation.from_matrix(head[:3, :3]).magnitude()
+                self.assertLessEqual(angle, np.deg2rad(8.6))
+                self.assertTrue(np.all(np.abs(head[:3, 3]) <= 0.004 + 1e-12))
+                self.assertTrue(np.all(np.abs(antennas - NEUTRAL[1]) <= 0.35 + 1e-12))
+                # Antennas are (right, left) and never cross over the head.
+                self.assertLess(antennas[0], 0)
+                self.assertGreater(antennas[1], 0)
+
+    def test_preview_plays_one_gesture_outside_a_reply_unless_gestures_are_off(self):
+        self.event("motion.preview", {"kind": "agree"})
+        self.assertEqual(self.controller.snapshot()["active"], "agree")
+        self.advance(2.0)
+        self.advance(0.4)
+        self.assertIsNone(self.controller.snapshot()["active"])
+        np.testing.assert_allclose(self.robot.poses[-1][0], NEUTRAL[0], atol=1e-12)
+        self.event("motion.enabled", {"enabled": False})
+        self.event("motion.preview", {"kind": "agree"})
+        self.assertEqual(self.controller.snapshot()["started"], 1)
+
+    def test_intensity_applies_to_the_next_gesture(self):
+        self.event("motion.intensity", {"value": 0.0})
+        self.start_happy()
+        self.advance(0.4)
+        np.testing.assert_allclose(self.robot.poses[-1][0], NEUTRAL[0], atol=1e-12)
+        np.testing.assert_allclose(self.robot.poses[-1][1], NEUTRAL[1], atol=1e-12)
+
+    def test_invalid_requests_are_rejected_before_they_reach_the_worker(self):
+        for request, argument in [
+            (self.controller.set_posture, "handstand"),
+            (self.controller.set_intensity, 1.5),
+            (self.controller.preview, "moonwalk"),
+        ]:
+            with self.subTest(argument=argument):
+                with self.assertRaises(ValueError):
+                    request(argument)
+        self.assertFalse(self.controller._events)
 
     def test_missing_cached_assets_disable_only_expressions(self):
         controller = Expressions(self.robot)

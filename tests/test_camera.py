@@ -123,6 +123,21 @@ class CameraLifecycleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     Camera(self.capture, self.send, self.source, **kwargs)
 
+    def test_new_capture_settings_apply_to_the_next_frame(self):
+        self.capture.return_value = np.zeros((360, 640, 3), dtype=np.uint8)
+        self.camera._capture_once()
+        self.camera.configure(fps=2.0, max_edge=320, quality=50)
+        self.camera._capture_once()
+        sizes = []
+        for call in self.send.call_args_list:
+            with Image.open(io.BytesIO(call.args[0])) as image:
+                sizes.append(image.size)
+        self.assertEqual(sizes, [(640, 360), (320, 180)])
+        self.assertEqual(self.camera.snapshot()["fps"], 2.0)
+        with self.assertRaises(ValueError):
+            self.camera.configure(fps=2.0, max_edge=320, quality=0)
+        self.assertEqual(self.camera.snapshot()["max_edge"], 320)
+
 
 class CameraAccessTests(unittest.TestCase):
     def test_local_browser_and_local_cli_are_allowed(self):

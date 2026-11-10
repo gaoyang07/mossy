@@ -29,6 +29,32 @@ RESPONSE_COOLDOWN = 4.0
 REACTION_COOLDOWN = 8.0
 MAX_START_DELAY = 1.5
 
+
+def _posture(
+    roll: float = 0.0, pitch: float = 0.0, z: float = 0.0, antennas: tuple[float, float] = (10, 10)
+) -> Pose:
+    """A resting pose from head angles in degrees, height in metres and antenna spread.
+
+    Positive roll tilts the head to its left and positive pitch looks down, as
+    in the SDK's wake-up and sleep poses. Antennas are (right, left) degrees
+    away from vertical.
+    """
+    head = np.eye(4)
+    head[:3, :3] = Rotation.from_euler("xyz", [roll, pitch, 0.0], degrees=True).as_matrix()
+    head[2, 3] = z
+    right, left = np.deg2rad(antennas)
+    return head, np.array([-right, left])
+
+
+# Poses the robot rests in between gestures. Each stays within what a gesture
+# may already add: 8 degrees, 4 mm and 0.35 rad of antenna from the SDK's pose.
+POSTURES: dict[str, Pose] = {
+    "neutral": NEUTRAL,
+    "attentive": _posture(pitch=-6.0, z=0.004, antennas=(3, 3)),
+    "relaxed": _posture(pitch=6.0, z=-0.004, antennas=(30, 30)),
+    "curious": _posture(roll=8.0, pitch=-3.0, antennas=(4, 26)),
+}
+
 # Revisions already preloaded by the daemon; loading never downloads on the
 # conversation path. Strip sidecar sound by constructing motion-only clips.
 LIBRARIES = {
@@ -153,6 +179,7 @@ class Expressions:
         self._responses: OrderedDict[Scope, Response] = OrderedDict()
         self._speaking: Scope | None = None
         self._motion: Motion | None = None
+        self._posture = NEUTRAL
         self._last_pose = (NEUTRAL[0].copy(), NEUTRAL[1].copy())
         self._return_at: float | None = None
         self._return_from = self._last_pose
@@ -166,6 +193,7 @@ class Expressions:
             "enabled": enabled,
             "available": moves is not None,
             "active": None,
+            "posture": "neutral",
             "last_expression": None,
             "started": 0,
             "cancelled": 0,
@@ -185,6 +213,23 @@ class Expressions:
                 self._events.append(("motion.reset", {}, now))
             self._events.append((action, dict(data), now))
         self._wake.set()
+
+    def set_posture(self, name: str) -> None:
+        """Move to another resting pose, and return to it after every gesture."""
+        if name not in POSTURES:
+            raise ValueError(f"MOSS_POSTURE must be one of {', '.join(POSTURES)}")
+        self.submit("motion.posture", {"name": name})
+
+    def set_intensity(self, intensity: float) -> None:
+        if not 0.0 <= intensity <= 1.0:
+            raise ValueError("MOSS_EXPRESSION_INTENSITY must be between 0 and 1")
+        self.submit("motion.intensity", {"value": intensity})
+
+    def preview(self, kind: str) -> None:
+        """Play one gesture now, outside the conversation's own triggers."""
+        if not any(kind in names for _, names in LIBRARIES.values()):
+            raise ValueError(f"Unknown gesture: {kind}")
+        self.submit("motion.preview", {"kind": kind})
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="moss-expressions", daemon=True)
@@ -223,8 +268,17 @@ class Expressions:
             self.enabled = bool(data["enabled"])
             self._update_status(enabled=self.enabled)
             self._reset(now)
+        elif action == "motion.posture":
+            self._return_to_neutral(now, cancelled=True)
+            self._posture = POSTURES[data["name"]]
+            self._update_status(posture=data["name"])
+            self._settle(now)
+        elif action == "motion.intensity":
+            self.intensity = float(data["value"])
         elif not self.enabled:
             return
+        elif action == "motion.preview":
+            self._start_motion(data["kind"], None, now)
         elif action.startswith("input.transcript."):
             if self._speaking is not None or not data.get("text", "").strip():
                 return
@@ -283,6 +337,10 @@ class Expressions:
                 self._status["cancelled"] += 1
             logger.info("Expression cancelled: %s scope=%s", self._motion.kind, self._motion.scope)
         self._motion = None
+        self._settle(now)
+
+    def _settle(self, now: float) -> None:
+        """Blend from wherever the head is to the resting pose."""
         self._return_at, self._return_from = now, self._last_pose
         self._update_status(active="returning")
 
@@ -327,8 +385,12 @@ class Expressions:
         target[:3, :3] = Rotation.from_rotvec(rotation).as_matrix()
         target[:3, 3] = np.clip(head[:3, 3] * intensity, -0.01, 0.01)
         antenna_delta = (np.asarray(antennas) - NEUTRAL[1]) * intensity
-        target_antennas = NEUTRAL[1] + np.clip(antenna_delta, -0.65, 0.65)
-        return blend_pose(motion.origin, (target, target_antennas), elapsed / BLEND_SECONDS)
+        # The recording moves the head and antennas relative to the resting pose.
+        rest_head, rest_antennas = self._posture
+        target_antennas = rest_antennas + np.clip(antenna_delta, -0.65, 0.65)
+        return blend_pose(
+            motion.origin, (rest_head @ target, target_antennas), elapsed / BLEND_SECONDS
+        )
 
     def _tick(self, now: float) -> None:
         self._choose(now)
@@ -341,7 +403,7 @@ class Expressions:
                 pose = self._sample(self._motion, elapsed)
         if self._return_at is not None:
             weight = (now - self._return_at) / BLEND_SECONDS
-            pose = blend_pose(self._return_from, NEUTRAL, weight)
+            pose = blend_pose(self._return_from, self._posture, weight)
             if weight >= 1.0:
                 self._return_at = None
                 self._update_status(active=None)
