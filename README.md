@@ -350,12 +350,15 @@ make check
 ```
 
 `make check` runs Ruff lint and format checks, unit tests and Python compilation.
-GitHub Actions runs the same checks on Python 3.12 with Ruff, NumPy, SciPy, Pillow,
-python-dotenv and WebSockets installed. Tests import the checkout through `PYTHONPATH=src`
-and use simulated robot output and a local WebSocket peer; they need no API key, robot,
-media stack or downloaded recordings. [test_app.py](tests/test_app.py) runs the whole app
-against a simulated robot and is skipped where the Reachy SDK is not installed, as in CI.
-Hardware checks are separate from CI.
+Tests import the checkout through `PYTHONPATH=src` and use simulated robot output and a
+local WebSocket peer; they need no API key, robot, media stack or downloaded recordings.
+[test_app.py](tests/test_app.py) runs the whole app against a simulated robot and is
+skipped where the Reachy SDK is not installed.
+
+GitHub Actions runs two jobs on Python 3.12. `lint` runs `make check` with only Ruff,
+NumPy, SciPy, Pillow, python-dotenv and WebSockets installed, for a quick answer. `app`
+installs mossy with Reachy SDK 1.8.4, the version it is tested against, and runs every
+test, including the whole-app ones. Hardware checks are separate from CI.
 
 To install the local Git hooks:
 
