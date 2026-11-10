@@ -27,7 +27,7 @@ dev = [
 ]
 
 [project.scripts]
-mossy = "mossy.main:main"
+mossy = "mossy.cli:main"
 
 [project.entry-points.reachy_mini_apps]
 mossy = "mossy.main:Moss"
