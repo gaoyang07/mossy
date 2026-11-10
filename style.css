@@ -12,11 +12,16 @@ body {
     text-align: center;
 }
 
+.logo {
+    width: 160px;
+    max-width: 50%;
+}
+
 h1 {
     font-size: 48px;
-    letter-spacing: 6px;
+    letter-spacing: 2px;
     color: #00d4ff;
-    margin-bottom: 8px;
+    margin: 8px 0;
 }
 
 .tagline {
@@ -52,6 +57,19 @@ h1 {
     line-height: 1.5;
 }
 
+.feature code {
+    color: #cbd5e1;
+    font-size: 12px;
+}
+
+.screenshot {
+    display: block;
+    width: 100%;
+    margin-bottom: 40px;
+    border: 1px solid #333;
+    border-radius: 12px;
+}
+
 .install {
     background: #0f1a2e;
     border: 1px solid #333;
@@ -75,4 +93,11 @@ h1 {
 .install code {
     color: #00d4ff;
     font-size: 13px;
+}
+
+.install .note {
+    margin: 12px 0 0;
+    color: #999;
+    font-size: 13px;
+    line-height: 1.5;
 }
