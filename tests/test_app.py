@@ -358,19 +358,46 @@ class AppTests(unittest.TestCase):
         self.assertTrue(restart)
 
     def test_settings_and_controls_are_refused_from_other_sites(self):
+        # A page on another site that the user has open, and a name that was
+        # re-pointed at this machine: both reach the port from a local browser.
         elsewhere = {"Origin": "https://attacker.example", "Sec-Fetch-Site": "cross-site"}
+        rebound = {"Host": "attacker.example"}
+        muted = self.app.muted
+        gestures = self.get("/state")[1]["expressions"]["enabled"]
         for route, body in (
             ("/api/settings", None),
             ("/api/settings", {"MOSS_LIVE_SPEED": 0.8}),
             ("/api/voices", None),
             ("/api/gesture/agree", {}),
             ("/api/app/stop", {}),
+            ("/mute", {}),
+            ("/expressions/toggle", {}),
+            ("/camera/toggle", {}),
         ):
-            with self.subTest(route=route, write=body is not None):
-                self.assertEqual(self.request(route, body, headers=elsewhere)[0], 403)
+            for headers in (elsewhere, rebound):
+                with self.subTest(route=route, write=body is not None, headers=headers):
+                    self.assertEqual(self.request(route, body, headers=headers)[0], 403)
         self.assertFalse(self.app.stop_event.is_set())
-        rebound = {"Host": "attacker.example"}
-        self.assertEqual(self.request("/api/settings", headers=rebound)[0], 403)
+        self.assertEqual(self.app.muted, muted)
+        self.assertEqual(self.get("/state")[1]["expressions"]["enabled"], gestures)
+
+    def test_the_page_is_told_whether_its_browser_may_use_the_controls(self):
+        self.assertIs(self.get("/state")[1]["local_access"], True)
+        rebound = self.request("/state", headers={"Host": "attacker.example"})
+        self.assertEqual(rebound[0], 200)  # Status stays readable; the controls do not.
+        self.assertIs(rebound[1]["local_access"], False)
+
+    def test_microphone_and_gesture_switches_work_from_this_machine(self):
+        muted = self.app.muted
+        self.assertEqual(self.request("/mute", {}), (200, {"muted": not muted}))
+        self.assertEqual(self.get("/state")[1]["muted"], not muted)
+        self.assertEqual(self.request("/mute", {}), (200, {"muted": muted}))
+
+        enabled = self.get("/state")[1]["expressions"]["enabled"]
+        self.assertEqual(self.request("/expressions/toggle", {}), (200, {"enabled": not enabled}))
+        wait_until(lambda: self.get("/state")[1]["expressions"]["enabled"] is not enabled)
+        self.assertEqual(self.request("/expressions/toggle", {}), (200, {"enabled": enabled}))
+        wait_until(lambda: self.get("/state")[1]["expressions"]["enabled"] is enabled)
 
     def test_a_gesture_can_be_previewed(self):
         wait_until(lambda: self.get("/state")[1]["expressions"]["available"])

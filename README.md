@@ -116,7 +116,9 @@ The command talks to the Reachy daemon's local HTTP API. It only stops an app na
 ## Settings page
 
 `mossy gui` opens the page with its settings panel. The panel is shown only to a browser
-on the machine running mossy.
+on the machine running mossy. From another machine the page shows the status and the
+transcript; every control, including microphone mute and the gesture switch, answers
+only a local browser.
 
 <p align="center">
   <img src="docs/assets/runtime-ui.png" alt="The mossy page: status, camera preview and transcript on the left, settings on the right" width="760" />

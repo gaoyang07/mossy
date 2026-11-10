@@ -463,19 +463,26 @@ class Moss(ReachyMiniApp):
                         if self._camera
                         else None
                     ),
-                    "camera_local_access": local(request),
+                    "local_access": local(request),
                     "transcript": transcript,
                     "transcript_version": version,
                 }
             )
 
+        # Everything that changes something answers only a browser on this
+        # machine. The page itself and /state stay readable from the network.
+
         @app.post("/mute")
-        async def mute():
+        async def mute(request: Request):
+            if not local(request):
+                return refuse("Microphone controls require local access", 403)
             self.muted = not self.muted
             return JSONResponse({"muted": self.muted})
 
         @app.post("/expressions/toggle")
-        async def toggle_expressions():
+        async def toggle_expressions(request: Request):
+            if not local(request):
+                return refuse("Expression controls require local access", 403)
             if self._expressions is None:
                 return JSONResponse({"error": "Robot is not running"}, status_code=503)
             enabled = not self._expressions.snapshot()["enabled"]
@@ -503,8 +510,7 @@ class Moss(ReachyMiniApp):
                 return Response(status_code=204, headers={"Cache-Control": "no-store"})
             return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
-        # Settings and robot controls are for the person at this machine. The
-        # handlers below are plain functions, so the ones that wait for
+        # The handlers below are plain functions, so the ones that wait for
         # MOSS-Live run in the server's thread pool.
 
         @app.get("/api/settings")

@@ -47,7 +47,7 @@ let voiceRow = null;
 
 function renderCamera(data) {
     const camera = data.camera;
-    cameraBtn.disabled = !camera || !data.camera_local_access;
+    cameraBtn.disabled = !camera || !data.local_access;
     cameraBtn.textContent = camera?.enabled ? "关闭视觉" : "开启视觉";
     cameraStatus.textContent = !camera || !camera.enabled ? "视觉：关闭"
         : camera.error ? "Reachy 摄像头暂无画面，请检查连接及摄像头授权"
@@ -56,7 +56,7 @@ function renderCamera(data) {
         : camera.last_sent_age_s == null || camera.last_sent_age_s > 3
             ? "摄像头已就绪，等待发送画面"
             : `视觉：画面发送中 · ${camera.fps} FPS · 已发送 ${camera.sent_frames} 帧`;
-    const visible = camera?.enabled && camera.available && data.camera_local_access;
+    const visible = camera?.enabled && camera.available && data.local_access;
     cameraPanel.hidden = !visible;
     if (visible && previewFrame !== camera.captured_frames) {
         previewFrame = camera.captured_frames;
@@ -101,8 +101,12 @@ function renderStatus(data) {
     statusText.textContent = data.error || (data.muted ? `${label}（麦克风已静音）` : label);
     statusDot.className = `status-dot ${data.connected ? data.state : "disconnected"}`;
     muteBtn.textContent = data.muted ? "取消静音" : "静音麦克风";
+    // The switches answer only a browser on the machine that runs MOSS.
+    const hint = data.local_access ? "" : "请在运行 MOSS 的电脑上操作";
+    muteBtn.disabled = !data.local_access;
+    muteBtn.title = expressionsBtn.title = cameraBtn.title = hint;
     const expression = data.expressions;
-    expressionsBtn.disabled = !expression || !expression.available;
+    expressionsBtn.disabled = !expression || !expression.available || !data.local_access;
     expressionsBtn.textContent = expression?.enabled ? "关闭表情动作" : "开启表情动作";
     expressionStatus.textContent = !expression ? "表情动作准备中…"
         : expression.error ? "表情动作暂不可用，语音可继续使用"
@@ -136,7 +140,7 @@ async function poll() {
             transcriptVersion = data.transcript_version;
         }
         renderCamera(data);
-        if (data.camera_local_access && !settingsLoaded) loadSettings();
+        if (data.local_access && !settingsLoaded) loadSettings();
     } catch (e) {
         statusText.textContent = "无法连接到机器人";
         statusDot.className = "status-dot disconnected";
