@@ -46,7 +46,7 @@ jobs:
           gi.require_version("Gst", "1.0")
           gi.require_version("GstApp", "1.0")
           from gi.repository import Gst, GstApp
-          Gst.init(None)
+          Gst.init([])
           for factory in ("webrtcdsp", "webrtcechoprobe", "audiotestsrc", "audiomixer"):
               assert Gst.ElementFactory.find(factory), f"Missing GStreamer plugin: {factory}"
           PY

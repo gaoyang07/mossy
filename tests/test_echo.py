@@ -47,7 +47,7 @@ class GStreamerEchoTests(unittest.TestCase):
         except (ImportError, ValueError) as exc:
             raise unittest.SkipTest("needs GStreamer and GstApp typelibs") from exc
 
-        Gst.init(None)
+        Gst.init([])
         for factory in ("webrtcdsp", "webrtcechoprobe", "audiotestsrc", "audiomixer"):
             if Gst.ElementFactory.find(factory) is None:
                 raise unittest.SkipTest(f"needs the GStreamer {factory} plugin")

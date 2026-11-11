@@ -89,7 +89,17 @@ def enable_software_aec(audio: Any) -> tuple[Any, Any]:
     if state != Gst.State.NULL or pending not in (Gst.State.VOID_PENDING, Gst.State.NULL):
         raise RuntimeError("Configure software AEC before the audio pipeline starts")
 
-    elements = list(pipeline.iterate_elements())
+    # Distribution PyGObject may expose only the introspection API, without
+    # gst-python's iterable/exception overrides. Use the common iterator API.
+    elements = []
+    iterator = pipeline.iterate_elements()
+    while True:
+        result, element = iterator.next()
+        if result == Gst.IteratorResult.DONE:
+            break
+        if result != Gst.IteratorResult.OK:
+            raise RuntimeError("Audio pipeline changed while configuring software AEC")
+        elements.append(element)
 
     def find(factory: str) -> list[Any]:
         return [
@@ -153,7 +163,10 @@ def enable_software_aec(audio: Any) -> tuple[Any, Any]:
     added, detached, connected = [], [], []
     try:
         for element in reference + microphone:
-            pipeline.add(element)  # PyGObject raises AddError rather than returning a bool.
+            # Plain introspection returns bool; gst-python returns None on
+            # success and raises AddError on failure.
+            if pipeline.add(element) is False:
+                raise RuntimeError("Cannot add software AEC to the audio pipeline")
             added.append(element)
         for source, sink, chain in links:
             if not source.unlink(sink):
@@ -166,21 +179,19 @@ def enable_software_aec(audio: Any) -> tuple[Any, Any]:
             ]
             pairs.append((chain[-1].get_static_pad("src"), sink))
             for left, right in pairs:
-                try:
-                    left.link(right)
-                except Gst.LinkError as exc:
-                    raise RuntimeError(
-                        "Cannot link software AEC with its playback reference"
-                    ) from exc
+                if left.link(right) != Gst.PadLinkReturn.OK:
+                    raise RuntimeError("Cannot link software AEC with its playback reference")
                 connected.append((left, right))
-    except Exception:
+    except Exception as exc:
         for left, right in reversed(connected):
             left.unlink(right)
         for element in reversed(added):
             pipeline.remove(element)
         for source, sink in detached:
             source.link(sink)
-        raise
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError("Cannot link software AEC with its playback reference") from exc
     return dsp, probe
 
 
