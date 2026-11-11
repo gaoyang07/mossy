@@ -91,6 +91,14 @@ FIELDS: dict[str, Field] = {
         "半双工",
         help="机器人说话时屏蔽麦克风；关闭后可随时打断，需要回声消除正常工作",
     ),
+    "MOSS_SOFTWARE_AEC": Field(
+        "bool",
+        True,
+        "conversation",
+        "软件回声消除",
+        scope="restart",
+        help="在硬件回声消除后追加 WebRTC AEC；需要本机音频路径，重启后生效",
+    ),
     "MOSS_AUDIO_GAIN": Field(
         "float", 1.0, "conversation", "本地播放增益", minimum=0, maximum=4, step=0.1
     ),

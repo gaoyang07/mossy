@@ -143,6 +143,10 @@ class FakeRobot:
         time.sleep(FLUSH_SECONDS)  # A flush can be a blocking call to the daemon.
         self._record("cleared")
 
+    def apply_audio_config(self, values, *, verify):
+        self.audio_config = (values, verify)
+        return True
+
     def set_target(self, *, head, antennas):
         self.poses.append((head, antennas))
 
@@ -185,6 +189,7 @@ class AppTests(unittest.TestCase):
             "MOSS_LIVE_URL": f"http://127.0.0.1:{cls.server.port}",
             "MOSS_LIVE_VOICE_ID": "voice-1",
             "MOSS_HALF_DUPLEX": False,
+            "MOSS_SOFTWARE_AEC": False,  # The simulated robot has no GStreamer graph.
             "MOSS_WEB_UI_PORT": port,
             "MOSS_TIME_ZONE": "",
         }
@@ -262,6 +267,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(state["voice_id"], "voice-1")
         self.assertEqual(state["stats"]["output_rate"], 16000)
         self.assertTrue(state["full_duplex"])
+        self.assertTrue(state["echo_cancellation"]["hardware"]["verified_at_startup"])
+        self.assertFalse(state["echo_cancellation"]["software"]["enabled"])
 
     def test_speech_is_played_in_order_and_an_interruption_never_waits_for_the_flush(self):
         scope = {"run_id": "run-1", "turn_id": "turn-1"}
@@ -421,6 +428,7 @@ class ShutdownTests(unittest.TestCase):
             **config.load({}),
             "MOSS_API_KEY": "test-only-key",
             "MOSS_LIVE_URL": f"http://127.0.0.1:{server.port}",
+            "MOSS_SOFTWARE_AEC": False,
             "MOSS_WEB_UI_PORT": port,
             "MOSS_EXPRESSIONS": False,
             **overrides,

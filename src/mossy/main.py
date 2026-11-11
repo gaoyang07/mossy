@@ -25,6 +25,7 @@ from reachy_mini.reachy_mini import INIT_ANTENNAS_JOINT_POSITIONS, INIT_HEAD_POS
 from . import STARTED_AT, config
 from .audio import REACHY_SAMPLE_RATE, SpeechDecimator, mic_to_pcm, pcm_to_float
 from .camera import Camera, local_camera_access
+from .echo import EchoCancellation
 from .expressions import Expressions
 from .live_client import MossLive, list_voices
 
@@ -65,6 +66,7 @@ class Moss(ReachyMiniApp):
         self.muted = False
         self._expressions: Expressions | None = None
         self._camera: Camera | None = None
+        self._echo: EchoCancellation | None = None
 
         self._transcript_lock = threading.Lock()
         self._transcript_version = 0
@@ -119,6 +121,9 @@ class Moss(ReachyMiniApp):
             reachy_mini,
             enabled=settings["MOSS_EXPRESSIONS"],
             intensity=settings["MOSS_EXPRESSION_INTENSITY"],
+        )
+        self._echo = EchoCancellation(
+            reachy_mini.media.audio, software=settings["MOSS_SOFTWARE_AEC"]
         )
 
         # The page, the MOSS-Live handshake and the gesture recordings do not
@@ -457,6 +462,7 @@ class Moss(ReachyMiniApp):
                     "stats": {**self._live.stats(), "ready_s": self._ready_s},
                     "error": self._live.last_error,
                     "full_duplex": not self.settings["MOSS_HALF_DUPLEX"],
+                    "echo_cancellation": self._echo.snapshot() if self._echo else None,
                     "expressions": self._expressions.snapshot() if self._expressions else None,
                     "camera": (
                         {**self._camera.snapshot(), **self._live.camera_status()}
