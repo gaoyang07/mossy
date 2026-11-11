@@ -27,15 +27,28 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install what PyGObject builds against
-        # On Linux the SDK depends on PyGObject, which is built from source.
+      - name: Install PyGObject build dependencies and GStreamer AEC
+        # The SDK builds PyGObject on Linux; AEC tests also need the real plugins.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgirepository1.0-dev libcairo2-dev
+          sudo apt-get install -y --no-install-recommends \
+            libgirepository1.0-dev libcairo2-dev \
+            gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-bad
       - name: Install mossy with the Reachy SDK it is tested against
         run: python -m pip install -e . "reachy_mini==1.8.4"
-      - name: Import the app
-        # The whole-app tests skip themselves without the SDK. Here that must fail.
-        run: python -c "import mossy.main"
+      - name: Verify app and AEC test dependencies
+        # These suites may skip on a minimal checkout, but must run in this job.
+        run: |
+          python - <<'PY'
+          import mossy.main
+          import gi
+          gi.require_version("Gst", "1.0")
+          gi.require_version("GstApp", "1.0")
+          from gi.repository import Gst, GstApp
+          Gst.init(None)
+          for factory in ("webrtcdsp", "webrtcechoprobe", "audiotestsrc", "audiomixer"):
+              assert Gst.ElementFactory.find(factory), f"Missing GStreamer plugin: {factory}"
+          PY
       - name: Run every test
         run: make test

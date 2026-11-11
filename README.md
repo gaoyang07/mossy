@@ -225,8 +225,28 @@ mossy config set MOSS_HALF_DUPLEX=0
 ```
 
 The microphone then remains active during replies, allowing you to interrupt.
-If speaker echo causes the robot to interrupt itself, use half duplex while
-checking the audio setup. Echo handling depends on the Reachy runtime and device.
+On startup, mossy enables and verifies the audio board's AEC, echo suppression
+and nonlinear echo attenuation (`SHF_BYPASS=0`, `PP_ECHOONOFF=1`,
+`PP_NLATTENONOFF=1`, `PP_NLAEC_MODE=0`; zero means normal mode, not disabled).
+It reapplies these settings after each start rather than writing the board's flash.
+
+Software echo cancellation is also enabled by default (`MOSS_SOFTWARE_AEC=1`).
+On the SDK 1.8.4 **LOCAL** GStreamer backend, mossy adds a WebRTC AEC to the
+microphone path and an echo probe to the mixed speaker path. They share one
+pipeline clock and 16 kHz audio format. Echo cancellation is on. Older plugins
+also enable extended filtering and delay-agnostic processing with moderate
+suppression. GStreamer 1.28 retains those legacy options as deprecated no-ops;
+mossy reports them as unsupported instead of pretending to enable them.
+Additional software AGC and noise suppression are off because the board already
+processes them. `/state` exposes the verified hardware setup, actual software
+properties, unsupported options, and negotiated capture/reference formats in
+`echo_cancellation`.
+
+To return to the SDK's original audio path, use
+`mossy config set MOSS_SOFTWARE_AEC=0` and `mossy restart`; hardware AEC remains
+enabled. Other media backends must use this setting until they provide a matched
+software playback reference. If residual echo still makes the robot interrupt
+itself, half duplex remains available while tuning the acoustic setup.
 
 ### Visual questions
 
@@ -296,6 +316,7 @@ save them. After editing the file by hand, run `mossy restart`.
 | --- | --- | --- |
 | `MOSS_API_KEY` | required | API credential |
 | `MOSS_HALF_DUPLEX` | `1` | `0` enables listening during replies |
+| `MOSS_SOFTWARE_AEC` | `1` | Add WebRTC AEC after the board's echo processing; LOCAL backend, restart required |
 | `MOSS_IDLE_SHUTDOWN_MIN` | `0` | Minutes without anyone speaking before the robot sleeps and the session closes; `0` never |
 | `MOSS_POSTURE` | `neutral` | Resting posture: `neutral`, `attentive`, `relaxed` or `curious` |
 | `MOSS_WAKE_ANIMATION` | `1` | `0` skips the wake-up sound and head wiggle, starting about 1.5 s sooner |
@@ -380,14 +401,17 @@ make check
 
 `make check` runs Ruff lint and format checks, unit tests and Python compilation.
 Tests import the checkout through `PYTHONPATH=src` and use simulated robot output and a
-local WebSocket peer; they need no API key, robot, media stack or downloaded recordings.
+local WebSocket peer; they need no API key, robot or downloaded recordings.
 [test_app.py](tests/test_app.py) runs the whole app against a simulated robot and is
-skipped where the Reachy SDK is not installed.
+skipped where the Reachy SDK is not installed. The audio-flow tests in
+[test_echo.py](tests/test_echo.py) use real GStreamer elements with synthetic sources
+and sinks; they are skipped if GStreamer or its WebRTC AEC plugins are unavailable.
 
 GitHub Actions runs two jobs on Python 3.12. `lint` runs `make check` with only Ruff,
 NumPy, SciPy, Pillow, python-dotenv and WebSockets installed, for a quick answer. `app`
-installs mossy with Reachy SDK 1.8.4, the version it is tested against, and runs every
-test, including the whole-app ones. Hardware checks are separate from CI.
+installs mossy with Reachy SDK 1.8.4 and the GStreamer AEC plugins, verifies those
+dependencies, and runs every test, including the whole-app and audio-flow suites.
+Hardware checks are separate from CI.
 
 To install the local Git hooks:
 
